@@ -105,7 +105,8 @@ class StreamingReasoningProcessor:
         if not self.inside_tag:
             if self.tag_buffer: remaining_content_chunks.append(self.tag_buffer)
         else:
-            if self.tag_buffer: remaining_content_chunks.append(self.tag_buffer)
+            # 修复：未闭合的标签内容应归属思考块，而不是正文！
+            if self.tag_buffer: self._reasoning_chunks.append(self.tag_buffer)
             self.inside_tag = False
             
         remaining_content = "".join(remaining_content_chunks)
@@ -531,20 +532,24 @@ async def execute_gemini_call(
                             contents=actual_prompt_for_call,
                             config=gen_config_dict
                         )
+                        
+                        # 初始化 Token 计数器，移至循环外防止多次打印累加
+                        final_p_tk, final_c_tk, final_t_tk = 0, 0, 0
+                        
                         # 真正的深水区：在这里迭代时随时会引爆 429
                         async for chunk_item_call in stream_gen_obj:
-                            # [拦截真流式 Token]
                             if hasattr(chunk_item_call, 'usage_metadata') and chunk_item_call.usage_metadata:
                                 um = chunk_item_call.usage_metadata
-                                p_tk = getattr(um, 'prompt_token_count', 0) or 0
-                                c_tk = getattr(um, 'candidates_token_count', 0) or 0
-                                t_tk = getattr(um, 'total_token_count', p_tk + c_tk) or (p_tk + c_tk)
-                                if p_tk > 0 or c_tk > 0:
-                                    print(f"💰 [算力消耗] 提示词: {p_tk} | 模型思考与生成: {c_tk} | 总计: {t_tk} Tokens")
+                                final_p_tk = getattr(um, 'prompt_token_count', 0) or 0
+                                final_c_tk = getattr(um, 'candidates_token_count', 0) or 0
+                                final_t_tk = getattr(um, 'total_token_count', final_p_tk + final_c_tk) or (final_p_tk + final_c_tk)
                                     
                             yield convert_chunk_to_openai(chunk_item_call, request_obj.model, response_id_for_stream, 0)
                         
-                        # 顺利迭代完毕，安全跳出重试循环
+                        # 顺利迭代完毕，统一打印最终算力消耗
+                        if final_p_tk > 0 or final_c_tk > 0:
+                            print(f"💰 [算力消耗] 提示词: {final_p_tk} | 模型思考与生成: {final_c_tk} | 总计: {final_t_tk} Tokens")
+                            
                         yield "data: [DONE]\n\n"
                         break 
                         

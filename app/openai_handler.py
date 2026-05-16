@@ -60,34 +60,34 @@ class ExpressClientWrapper:
 
     async def _stream_generator(self, response: httpx.Response) -> AsyncGenerator[FakeChatCompletionChunk, None]:
         """Generates stream chunks from the httpx response with strict Type-Safe Token sniffing."""
+        final_p_tk, final_c_tk, final_t_tk = 0, 0, 0
         async for line in response.aiter_lines():
             if not line:
                 continue
             
-            # 必须剥离前缀，精准捕获数据本体
             if line.startswith("data:"):
                 json_str = line[len("data: "):].strip()
                 
-                # 遇到终止符必须立刻停止，否则会引发解析错误
                 if json_str == "[DONE]":
                     break
                     
                 try:
                     data = json.loads(json_str)
-                    # 强类型 Token 嗅探器
-                    if isinstance(data, dict) and "usage" in data:
+                    # 动态捕获 Token 消耗，不立刻打印，留到最后
+                    if isinstance(data, dict) and "usage" in data and data["usage"]:
                         usage = data["usage"]
-                        if isinstance(usage, dict):
-                            prompt_tk = usage.get("prompt_tokens", 0)
-                            comp_tk = usage.get("completion_tokens", 0)
-                            total_tk = usage.get("total_tokens", prompt_tk + comp_tk)
-                            print(f"💰 [算力消耗] 提示词: {prompt_tk} | 模型思考与生成: {comp_tk} | 总计: {total_tk} Tokens")
+                        final_p_tk = usage.get("prompt_tokens", 0)
+                        final_c_tk = usage.get("completion_tokens", 0)
+                        final_t_tk = usage.get("total_tokens", final_p_tk + final_c_tk)
                     
-                    # [核心修复]：必须将解析后的纯净字典(data)包装传递！绝不能传原始字符串(line)！
                     yield FakeChatCompletionChunk(data)
                     
                 except json.JSONDecodeError:
                     continue
+        
+        # 将 Token 打印外置，流结束时只打印一次，防止疯狂累加
+        if final_p_tk > 0 or final_c_tk > 0:
+            print(f"💰 [算力消耗] 提示词: {final_p_tk} | 模型思考与生成: {final_c_tk} | 总计: {final_t_tk} Tokens")
             
     async def _streaming_create(self, **kwargs) -> AsyncGenerator[FakeChatCompletionChunk, None]:
         """Handles the creation of a streaming request using httpx with built-in retry."""
@@ -99,11 +99,10 @@ class ExpressClientWrapper:
         if 'extra_body' in payload:
             payload.update(payload.pop('extra_body'))
 
-        # [新增高维指令]：用枪指着 Google，强迫它在流式结尾交出 Token 消耗表！
+        # 强制包含 Token 消耗流
         payload["stream_options"] = {"include_usage": True}
 
         proxies = None
-        # ... 后面保留你原有的 proxies 和 timeout 逻辑 ...
         if app_config.PROXY_URL:
             if app_config.PROXY_URL.startswith("socks"):
                 proxies = {"all://": app_config.PROXY_URL}
@@ -203,6 +202,7 @@ class OpenAIDirectHandler:
             {"category": "HARM_CATEGORY_IMAGE_SEXUALLY_EXPLICIT", "threshold": safety_threshold, "method": safety_method},
             {"category": "HARM_CATEGORY_JAILBREAK", "threshold": safety_threshold, "method": safety_method}
         ]
+
     def create_openai_client(self, project_id: str, gcp_token: str, location: str = "global") -> openai.AsyncOpenAI:
         """Create an OpenAI client configured for Vertex AI endpoint."""
         endpoint_url = (
@@ -235,11 +235,7 @@ class OpenAIDirectHandler:
         Prepare parameters for OpenAI API call by converting the request to a dictionary,
         and then overriding the model. This is more robust than manually picking parameters.
         """
-        # Convert the request to a dict, excluding unset values. `None` values inside
-        # nested models (like messages) are preserved.
         params = request.model_dump(exclude_unset=True)
-        
-        # Update model and filter out top-level None values.
         params['model'] = model_id
         
         if is_openai_search:
@@ -250,13 +246,11 @@ class OpenAIDirectHandler:
             del openai_params["reasoning_effort"]
         return openai_params
     
-    
     def prepare_extra_body(self) -> Dict[str, Any]:
         """Prepare extra body parameters for OpenAI API call with strict CamelCase for Google."""
         return {
             "extra_body": {
                 'google': {
-                    # 必须是小驼峰，否则 Google 后端会静默丢弃！
                     'safetySettings': self.safety_settings,
                     'thoughtTagMarker': VERTEX_REASONING_TAG,
                     "thinkingConfig": {
@@ -295,36 +289,27 @@ class OpenAIDirectHandler:
     
     async def _true_stream_generator(
         self,
-        openai_client: Any, # Can be openai.AsyncOpenAI or our wrapper
+        openai_client: Any,
         openai_params: Dict[str, Any],
         openai_extra_body: Dict[str, Any],
         request: OpenAIRequest
     ) -> AsyncGenerator[str, None]:
         """Generate true streaming response."""
         try:
-            # Ensure stream=True is explicitly passed for real streaming
             openai_params_for_stream = {**openai_params, "stream": True}
             
-            # 用 execute_with_retry 包裹原始的 create 方法
             stream_response = await execute_with_retry(
                 openai_client.chat.completions.create,
                 **openai_params_for_stream,
                 extra_body=openai_extra_body
             )
             
-            # Create processor for tag-based extraction across chunks
             reasoning_processor = StreamingReasoningProcessor(VERTEX_REASONING_TAG)
-            chunk_count = 0
-            has_sent_content = False
             
             async for chunk in stream_response:
-                chunk_count += 1
                 try:
                     chunk_as_dict = chunk.model_dump(exclude_unset=True, exclude_none=True)
                     
-                    # ========================================================
-                    # [绝对防御]: 防止 Google 传回非字典的畸形字符串引发 'str' 崩溃！
-                    # ========================================================
                     if not isinstance(chunk_as_dict, dict):
                         continue
                     
@@ -332,17 +317,14 @@ class OpenAIDirectHandler:
                     if choices and isinstance(choices, list) and len(choices) > 0:
                         delta = choices[0].get('delta')
                         if delta and isinstance(delta, dict):
-                            # Always remove extra_content if present
                             if 'extra_content' in delta:
                                 del delta['extra_content']
                             
                             content = delta.get('content', '')
                             original_choice = chunk_as_dict['choices'][0]
                             if content:
-                                # Use the processor to extract reasoning
                                 processed_content, current_reasoning = reasoning_processor.process_chunk(content)
                                 
-                                # Send chunks for both reasoning and content as they arrive
                                 original_finish_reason = original_choice.get('finish_reason')
                                 original_usage = original_choice.get('usage')
 
@@ -374,18 +356,16 @@ class OpenAIDirectHandler:
                                         content_payload['choices'][0]['usage'] = usage_for_this_content_delta
                                     
                                     yield f"data: {json.dumps(content_payload)}\n\n"
-                                    has_sent_content = True
                                 
                             elif original_choice.get('finish_reason'): 
                                 yield f"data: {json.dumps(chunk_as_dict)}\n\n"
                             elif not content and not original_choice.get('finish_reason') :
                                 yield f"data: {json.dumps(chunk_as_dict)}\n\n"
                     else:
-                        # Yield chunks without choices too (they might contain metadata)
                         yield f"data: {json.dumps(chunk_as_dict)}\n\n"
 
                 except asyncio.CancelledError:
-                    raise  # 内部循环直接向上抛出，由外层接管
+                    raise
                 except Exception as chunk_error:
                     error_msg = f"Error processing OpenAI chunk for {request.model}: {str(chunk_error)}"
                     print(f"ERROR: {error_msg}")
@@ -396,10 +376,9 @@ class OpenAIDirectHandler:
                     yield "data: [DONE]\n\n"
                     return
             
-            # Flush any remaining buffered content
+            # 流式结束时，冲刷并吐出缓冲区中由于切割而遗留的思考标签和正文内容
             remaining_content, remaining_reasoning = reasoning_processor.flush_remaining()
             
-            # Send any remaining reasoning first
             if remaining_reasoning:
                 reasoning_flush_payload = {
                     "id": f"chatcmpl-flush-{int(time.time())}",
@@ -410,7 +389,6 @@ class OpenAIDirectHandler:
                 }
                 yield f"data: {json.dumps(reasoning_flush_payload)}\n\n"
             
-            # Send any remaining content
             if remaining_content:
                 content_flush_payload = {
                     "id": f"chatcmpl-flush-{int(time.time())}",
@@ -420,9 +398,7 @@ class OpenAIDirectHandler:
                     "choices": [{"index": 0, "delta": {"content": remaining_content}, "finish_reason": None}]
                 }
                 yield f"data: {json.dumps(content_flush_payload)}\n\n"
-                has_sent_content = True
             
-            # Always send a finish reason chunk
             finish_payload = {
                 "id": f"chatcmpl-final-{int(time.time())}", 
                 "object": "chat.completion.chunk",
@@ -447,72 +423,18 @@ class OpenAIDirectHandler:
             yield f"data: {json.dumps(error_response)}\n\n"
             yield "data: [DONE]\n\n"             
             return
-            
-            # Debug logging for buffer state and chunk count
-            # print(f"DEBUG: Stream ended after {chunk_count} chunks. Buffer state - tag_buffer: '{reasoning_processor.tag_buffer}', "
-            #       f"inside_tag: {reasoning_processor.inside_tag}, "
-            #       f"reasoning_buffer: '{reasoning_processor.reasoning_buffer[:50]}...' if reasoning_processor.reasoning_buffer else ''")
-            # Flush any remaining buffered content
-            remaining_content, remaining_reasoning = reasoning_processor.flush_remaining()
-            
-            # Send any remaining reasoning first
-            if remaining_reasoning:
-                reasoning_flush_payload = {
-                    "id": f"chatcmpl-flush-{int(time.time())}",
-                    "object": "chat.completion.chunk",
-                    "created": int(time.time()),
-                    "model": request.model,
-                    "choices": [{"index": 0, "delta": {"reasoning_content": remaining_reasoning}, "finish_reason": None}]
-                }
-                yield f"data: {json.dumps(reasoning_flush_payload)}\n\n"
-            
-            # Send any remaining content
-            if remaining_content:
-                content_flush_payload = {
-                    "id": f"chatcmpl-flush-{int(time.time())}",
-                    "object": "chat.completion.chunk",
-                    "created": int(time.time()),
-                    "model": request.model,
-                    "choices": [{"index": 0, "delta": {"content": remaining_content}, "finish_reason": None}]
-                }
-                yield f"data: {json.dumps(content_flush_payload)}\n\n"
-                has_sent_content = True
-            
-            # Always send a finish reason chunk
-            finish_payload = {
-                "id": f"chatcmpl-final-{int(time.time())}", # Kilo Code: Changed ID for clarity
-                "object": "chat.completion.chunk",
-                "created": int(time.time()),
-                "model": request.model,
-                "choices": [{"index": 0, "delta": {}, "finish_reason": "stop"}]
-            }
-            yield f"data: {json.dumps(finish_payload)}\n\n"
-            
-            yield "data: [DONE]\n\n"
-            
-        except Exception as stream_error:
-            error_msg = str(stream_error)
-            if len(error_msg) > 1024:
-                error_msg = error_msg[:1024] + "..."
-            error_msg_full = f"Error during OpenAI streaming for {request.model}: {error_msg}"
-            print(f"ERROR: {error_msg_full}")
-            error_response = create_openai_error_response(500, error_msg_full, "server_error")
-            yield f"data: {json.dumps(error_response)}\n\n"
-            yield "data: [DONE]\n\n"
     
     async def handle_non_streaming_response(
         self,
-        openai_client: Any, # Can be openai.AsyncOpenAI or our wrapper
+        openai_client: Any, 
         openai_params: Dict[str, Any],
         openai_extra_body: Dict[str, Any],
         request: OpenAIRequest
     ) -> JSONResponse:
         """Handle non-streaming responses for OpenAI Direct mode."""
         try:
-            # Ensure stream=False is explicitly passed
             openai_params_non_stream = {**openai_params, "stream": False}
             
-            # [核心修改]: 用 execute_with_retry 包裹原始的 create 方法
             response = await execute_with_retry(
                 openai_client.chat.completions.create,
                 **openai_params_non_stream,
@@ -525,25 +447,19 @@ class OpenAIDirectHandler:
                 if choices and isinstance(choices, list) and len(choices) > 0:
                     message_dict = choices[0].get('message')
                     if message_dict and isinstance(message_dict, dict):
-                        # Always remove extra_content from the message if it exists
                         if 'extra_content' in message_dict:
                             del message_dict['extra_content']
                         
-                        # Extract reasoning from content
                         full_content = message_dict.get('content')
                         actual_content = full_content if isinstance(full_content, str) else ""
                         
                         if actual_content:
-                            print(f"INFO: OpenAI Direct Non-Streaming - Applying tag extraction with fixed marker: '{VERTEX_REASONING_TAG}'")
+                            # 提取思考内容，并将其从正文中剥离
                             reasoning_text, actual_content = extract_reasoning_by_tags(actual_content, VERTEX_REASONING_TAG)
                             message_dict['content'] = actual_content
                             if reasoning_text:
                                 message_dict['reasoning_content'] = reasoning_text
-                                # print(f"DEBUG: Tag extraction success. Reasoning len: {len(reasoning_text)}, Content len: {len(actual_content)}")
-                            # else:
-                            #     print(f"DEBUG: No content found within fixed tag '{VERTEX_REASONING_TAG}'.")
                         else:
-                            print(f"WARNING: OpenAI Direct Non-Streaming - No initial content found in message.")
                             message_dict['content'] = ""
                             
             except Exception as e_reasoning:
@@ -563,7 +479,7 @@ class OpenAIDirectHandler:
         """Main entry point for processing OpenAI Direct mode requests."""
         print(f"INFO: Using OpenAI Direct Path for model: {request.model} (Express: {is_express})")
         
-        client: Any = None # Can be openai.AsyncOpenAI or our wrapper
+        client: Any = None 
 
         try:
             if is_express:
@@ -580,7 +496,7 @@ class OpenAIDirectHandler:
                 client = ExpressClientWrapper(project_id=project_id, api_key=express_api_key)
                 print(f"INFO: [OpenAI Express Path] Using ExpressClientWrapper for project: {project_id}")
 
-            else: # Standard SA-based OpenAI SDK Path
+            else: 
                 if not self.credential_manager:
                     raise Exception("Standard OpenAI Direct mode requires a CredentialManager.")
 

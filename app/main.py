@@ -58,132 +58,127 @@ def verify_auth(credentials: HTTPBasicCredentials = Depends(security)):
     return credentials.username
 
 # ==========================================
-# 💎 全新现代化 API 仪表盘 HTML (OneAPI 风格)
+# 💎 全新现代化 API 仪表盘 HTML (移动端适配版)
 # ==========================================
 DASHBOARD_HTML = """
 <!DOCTYPE html>
 <html lang="zh-CN">
 <head>
     <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
     <title>Vertex2OpenAI | 管理控制台</title>
     <script src="https://cdn.tailwindcss.com"></script>
     <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
     <style>
         body { background-color: #0B0F19; color: #E2E8F0; font-family: 'Inter', system-ui, sans-serif; }
         .glass-panel { background: rgba(30, 41, 59, 0.7); backdrop-filter: blur(10px); border: 1px solid rgba(255,255,255,0.08); }
-        .log-container { font-family: 'Fira Code', monospace; font-size: 0.85rem; }
+        .log-container { font-family: 'Fira Code', monospace; font-size: 0.85rem; word-break: break-all; }
         .nav-item { cursor: pointer; transition: all 0.2s; border-left: 3px solid transparent; }
         .nav-item.active { background: rgba(59, 130, 246, 0.1); border-left-color: #3B82F6; color: #60A5FA; }
         .nav-item:hover:not(.active) { background: rgba(255, 255, 255, 0.05); }
-        /* 隐藏滚动条但保留功能 */
+        /* 移动端顶部横向导航适配 */
+        @media (max-width: 768px) {
+            .nav-item { border-left: none; border-bottom: 3px solid transparent; justify-content: center; flex: 1; }
+            .nav-item.active { border-bottom-color: #3B82F6; background: rgba(59, 130, 246, 0.1); }
+        }
         ::-webkit-scrollbar { width: 6px; height: 6px; }
         ::-webkit-scrollbar-track { background: transparent; }
         ::-webkit-scrollbar-thumb { background: #334155; border-radius: 10px; }
         ::-webkit-scrollbar-thumb:hover { background: #475569; }
     </style>
 </head>
-<body class="h-screen flex overflow-hidden">
-    <!-- 左侧导航栏 -->
-    <aside class="w-64 glass-panel border-r border-slate-800 flex flex-col z-20">
-        <div class="h-16 flex items-center px-6 border-b border-slate-800">
-            <div class="w-8 h-8 rounded-lg bg-gradient-to-br from-blue-500 to-purple-600 flex items-center justify-center font-bold text-white shadow-lg mr-3">V</div>
-            <span class="font-bold text-lg tracking-wider bg-clip-text text-transparent bg-gradient-to-r from-blue-400 to-purple-400">Vertex2OpenAI</span>
+<body class="h-screen flex flex-col md:flex-row overflow-hidden">
+    <!-- 导航栏：桌面端左侧，移动端顶部 -->
+    <aside class="w-full md:w-64 glass-panel border-b md:border-b-0 md:border-r border-slate-800 flex flex-col z-20 flex-shrink-0">
+        <div class="h-14 md:h-16 flex items-center px-4 md:px-6 border-b border-slate-800">
+            <div class="w-7 h-7 md:w-8 md:h-8 rounded-lg bg-gradient-to-br from-blue-500 to-purple-600 flex items-center justify-center font-bold text-white shadow-lg mr-3">V</div>
+            <span class="font-bold text-base md:text-lg tracking-wider bg-clip-text text-transparent bg-gradient-to-r from-blue-400 to-purple-400">Vertex2OpenAI</span>
         </div>
-        <nav class="flex-1 py-4 flex flex-col gap-1">
-            <div onclick="switchTab('dashboard')" id="nav-dashboard" class="nav-item active px-6 py-3 flex items-center gap-3">
-                <svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 6a2 2 0 012-2h2a2 2 0 012 2v2a2 2 0 01-2 2H6a2 2 0 01-2-2V6zM14 6a2 2 0 012-2h2a2 2 0 012 2v2a2 2 0 01-2 2h-2a2 2 0 01-2-2V6zM4 16a2 2 0 012-2h2a2 2 0 012 2v2a2 2 0 01-2 2H6a2 2 0 01-2-2v-2zM14 16a2 2 0 012-2h2a2 2 0 012 2v2a2 2 0 01-2 2h-2a2 2 0 01-2-2v-2z"></path></svg>
+        <nav class="flex flex-row md:flex-col py-0 md:py-4 overflow-x-auto">
+            <div onclick="switchTab('dashboard')" id="nav-dashboard" class="nav-item active px-4 py-3 md:px-6 md:py-3 flex items-center gap-2 whitespace-nowrap text-sm md:text-base">
+                <svg class="w-4 h-4 md:w-5 md:h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 6a2 2 0 012-2h2a2 2 0 012 2v2a2 2 0 01-2 2H6a2 2 0 01-2-2V6zM14 6a2 2 0 012-2h2a2 2 0 012 2v2a2 2 0 01-2 2h-2a2 2 0 01-2-2V6zM4 16a2 2 0 012-2h2a2 2 0 012 2v2a2 2 0 01-2 2H6a2 2 0 01-2-2v-2zM14 16a2 2 0 012-2h2a2 2 0 012 2v2a2 2 0 01-2 2h-2a2 2 0 01-2-2v-2z"></path></svg>
                 数据大盘
             </div>
-            <div onclick="switchTab('logs')" id="nav-logs" class="nav-item px-6 py-3 flex items-center gap-3">
-                <svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M8 9l3 3-3 3m5 0h3M5 20h14a2 2 0 002-2V6a2 2 0 00-2-2H5a2 2 0 00-2 2v12a2 2 0 002 2z"></path></svg>
+            <div onclick="switchTab('logs')" id="nav-logs" class="nav-item px-4 py-3 md:px-6 md:py-3 flex items-center gap-2 whitespace-nowrap text-sm md:text-base">
+                <svg class="w-4 h-4 md:w-5 md:h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M8 9l3 3-3 3m5 0h3M5 20h14a2 2 0 002-2V6a2 2 0 00-2-2H5a2 2 0 00-2 2v12a2 2 0 002 2z"></path></svg>
                 实时日志
             </div>
-            <div class="mt-auto px-6 py-4">
-                <div class="bg-slate-800/50 rounded-lg p-4 border border-slate-700/50">
-                    <div class="text-xs text-slate-400 mb-1">系统状态</div>
-                    <div class="flex items-center gap-2">
-                        <span class="w-2 h-2 rounded-full bg-emerald-500 animate-pulse"></span>
-                        <span class="text-sm text-emerald-400 font-medium">运行正常 (Running)</span>
-                    </div>
+        </nav>
+        <!-- 移动端隐藏底部状态栏以节省空间 -->
+        <div class="mt-auto px-6 py-4 hidden md:block">
+            <div class="bg-slate-800/50 rounded-lg p-4 border border-slate-700/50">
+                <div class="text-xs text-slate-400 mb-1">系统状态</div>
+                <div class="flex items-center gap-2">
+                    <span class="w-2 h-2 rounded-full bg-emerald-500 animate-pulse"></span>
+                    <span class="text-sm text-emerald-400 font-medium">运行正常</span>
                 </div>
             </div>
-        </nav>
+        </div>
     </aside>
 
     <!-- 右侧内容区 -->
-    <main class="flex-1 flex flex-col relative z-10 bg-[url('https://www.transparenttextures.com/patterns/cubes.png')] bg-opacity-5">
-        <!-- 顶栏 -->
-        <header class="h-16 glass-panel border-b border-slate-800 flex items-center justify-between px-8">
-            <h1 id="page-title" class="text-lg font-semibold">数据大盘</h1>
-            <div class="flex gap-3">
-                <button onclick="fetchStats()" class="bg-slate-800 hover:bg-slate-700 text-slate-300 px-4 py-1.5 rounded-lg text-sm transition-colors border border-slate-700 flex items-center gap-2">
-                    <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15"></path></svg>
-                    手动刷新
-                </button>
-            </div>
+    <main class="flex-1 flex flex-col relative z-10 bg-[url('https://www.transparenttextures.com/patterns/cubes.png')] bg-opacity-5 overflow-hidden">
+        <header class="h-14 md:h-16 glass-panel border-b border-slate-800 flex items-center justify-between px-4 md:px-8 shrink-0">
+            <h1 id="page-title" class="text-base md:text-lg font-semibold">数据大盘</h1>
+            <button onclick="fetchStats()" class="bg-slate-800 hover:bg-slate-700 text-slate-300 px-3 py-1.5 rounded-lg text-xs md:text-sm transition-colors border border-slate-700 flex items-center gap-2">
+                <svg class="w-3 h-3 md:w-4 md:h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15"></path></svg>
+                <span class="hidden sm:inline">手动刷新</span>
+            </button>
         </header>
 
-        <!-- 内容渲染区 -->
-        <div class="flex-1 overflow-y-auto p-8 relative">
-            
+        <div class="flex-1 overflow-y-auto p-4 md:p-8 relative">
             <!-- 视图 1：数据看板 -->
-            <div id="view-dashboard" class="max-w-6xl mx-auto space-y-6">
-                <!-- 顶部四个数据卡片 -->
-                <div class="grid grid-cols-1 md:grid-cols-4 gap-6">
-                    <div class="glass-panel p-6 rounded-2xl relative overflow-hidden group">
+            <div id="view-dashboard" class="max-w-6xl mx-auto space-y-4 md:space-y-6">
+                <div class="grid grid-cols-2 md:grid-cols-4 gap-4 md:gap-6">
+                    <div class="glass-panel p-4 md:p-6 rounded-2xl relative overflow-hidden group">
                         <div class="absolute -right-4 -top-4 w-24 h-24 bg-blue-500/10 rounded-full blur-xl group-hover:bg-blue-500/20 transition-all"></div>
-                        <h3 class="text-slate-400 text-sm font-medium mb-2">总请求次数</h3>
-                        <p id="stat-total" class="text-3xl font-bold text-white">0</p>
+                        <h3 class="text-slate-400 text-xs md:text-sm font-medium mb-1 md:mb-2">总请求次数</h3>
+                        <p id="stat-total" class="text-2xl md:text-3xl font-bold text-white">0</p>
                     </div>
-                    <div class="glass-panel p-6 rounded-2xl relative overflow-hidden group">
+                    <div class="glass-panel p-4 md:p-6 rounded-2xl relative overflow-hidden group">
                         <div class="absolute -right-4 -top-4 w-24 h-24 bg-emerald-500/10 rounded-full blur-xl group-hover:bg-emerald-500/20 transition-all"></div>
-                        <h3 class="text-slate-400 text-sm font-medium mb-2">成功响应</h3>
-                        <p id="stat-success" class="text-3xl font-bold text-emerald-400">0</p>
+                        <h3 class="text-slate-400 text-xs md:text-sm font-medium mb-1 md:mb-2">成功响应</h3>
+                        <p id="stat-success" class="text-2xl md:text-3xl font-bold text-emerald-400">0</p>
                     </div>
-                    <div class="glass-panel p-6 rounded-2xl relative overflow-hidden group">
+                    <div class="glass-panel p-4 md:p-6 rounded-2xl relative overflow-hidden group">
                         <div class="absolute -right-4 -top-4 w-24 h-24 bg-rose-500/10 rounded-full blur-xl group-hover:bg-rose-500/20 transition-all"></div>
-                        <h3 class="text-slate-400 text-sm font-medium mb-2">拦截/异常</h3>
-                        <p id="stat-error" class="text-3xl font-bold text-rose-400">0</p>
+                        <h3 class="text-slate-400 text-xs md:text-sm font-medium mb-1 md:mb-2">拦截/异常</h3>
+                        <p id="stat-error" class="text-2xl md:text-3xl font-bold text-rose-400">0</p>
                     </div>
-                    <div class="glass-panel p-6 rounded-2xl relative overflow-hidden group">
+                    <div class="glass-panel p-4 md:p-6 rounded-2xl relative overflow-hidden group">
                         <div class="absolute -right-4 -top-4 w-24 h-24 bg-purple-500/10 rounded-full blur-xl group-hover:bg-purple-500/20 transition-all"></div>
-                        <h3 class="text-slate-400 text-sm font-medium mb-2">运行时长</h3>
-                        <p id="stat-uptime" class="text-3xl font-bold text-purple-400">0 h</p>
+                        <h3 class="text-slate-400 text-xs md:text-sm font-medium mb-1 md:mb-2">运行时长</h3>
+                        <p id="stat-uptime" class="text-2xl md:text-3xl font-bold text-purple-400">0 h</p>
                     </div>
                 </div>
 
-                <!-- 图表与 Token 区 -->
-                <div class="grid grid-cols-1 lg:grid-cols-3 gap-6">
-                    <!-- 左侧：成功率环形图 -->
-                    <div class="glass-panel p-6 rounded-2xl lg:col-span-1 flex flex-col items-center justify-center">
+                <div class="grid grid-cols-1 lg:grid-cols-3 gap-4 md:gap-6">
+                    <div class="glass-panel p-4 md:p-6 rounded-2xl lg:col-span-1 flex flex-col items-center justify-center">
                         <h3 class="text-slate-400 text-sm font-medium w-full text-left mb-4">请求成功率监控</h3>
-                        <div class="w-48 h-48 relative">
+                        <div class="w-40 h-40 md:w-48 md:h-48 relative">
                             <canvas id="successChart"></canvas>
                         </div>
                     </div>
-                    
-                    <!-- 右侧：Token 消耗进度条 -->
-                    <div class="glass-panel p-6 rounded-2xl lg:col-span-2 flex flex-col justify-center">
-                        <h3 class="text-slate-400 text-sm font-medium mb-6">Token 算力消耗量</h3>
-                        <div class="space-y-6">
+                    <div class="glass-panel p-4 md:p-6 rounded-2xl lg:col-span-2 flex flex-col justify-center">
+                        <h3 class="text-slate-400 text-sm font-medium mb-4 md:mb-6">Token 算力消耗量</h3>
+                        <div class="space-y-4 md:space-y-6">
                             <div>
-                                <div class="flex justify-between text-sm mb-2">
-                                    <span class="text-slate-300 flex items-center gap-2"><span class="w-2 h-2 rounded-full bg-blue-500"></span> Prompt Tokens (输入)</span>
-                                    <span id="stat-prompt" class="font-mono text-blue-400 font-bold tracking-wider">0</span>
+                                <div class="flex justify-between text-xs md:text-sm mb-2">
+                                    <span class="text-slate-300 flex items-center gap-2"><span class="w-2 h-2 rounded-full bg-blue-500"></span> Prompt (输入)</span>
+                                    <span id="stat-prompt" class="font-mono text-blue-400 font-bold">0</span>
                                 </div>
-                                <div class="w-full bg-slate-800 rounded-full h-2.5"><div class="bg-gradient-to-r from-blue-600 to-blue-400 h-2.5 rounded-full" style="width: 80%"></div></div>
+                                <div class="w-full bg-slate-800 rounded-full h-2 md:h-2.5"><div class="bg-gradient-to-r from-blue-600 to-blue-400 h-2 md:h-2.5 rounded-full" style="width: 80%"></div></div>
                             </div>
                             <div>
-                                <div class="flex justify-between text-sm mb-2">
-                                    <span class="text-slate-300 flex items-center gap-2"><span class="w-2 h-2 rounded-full bg-purple-500"></span> Completion Tokens (输出)</span>
-                                    <span id="stat-comp" class="font-mono text-purple-400 font-bold tracking-wider">0</span>
+                                <div class="flex justify-between text-xs md:text-sm mb-2">
+                                    <span class="text-slate-300 flex items-center gap-2"><span class="w-2 h-2 rounded-full bg-purple-500"></span> Completion (输出)</span>
+                                    <span id="stat-comp" class="font-mono text-purple-400 font-bold">0</span>
                                 </div>
-                                <div class="w-full bg-slate-800 rounded-full h-2.5"><div class="bg-gradient-to-r from-purple-600 to-purple-400 h-2.5 rounded-full" style="width: 60%"></div></div>
+                                <div class="w-full bg-slate-800 rounded-full h-2 md:h-2.5"><div class="bg-gradient-to-r from-purple-600 to-purple-400 h-2 md:h-2.5 rounded-full" style="width: 60%"></div></div>
                             </div>
-                            <div class="pt-4 border-t border-slate-700/50 mt-4 flex justify-between items-center">
-                                <span class="text-sm text-slate-400">总计消耗 (Total)</span>
-                                <span id="stat-total-tokens" class="text-xl font-bold bg-clip-text text-transparent bg-gradient-to-r from-blue-400 to-purple-400 font-mono">0</span>
+                            <div class="pt-3 md:pt-4 border-t border-slate-700/50 mt-3 md:mt-4 flex justify-between items-center">
+                                <span class="text-xs md:text-sm text-slate-400">总计消耗 (Total)</span>
+                                <span id="stat-total-tokens" class="text-lg md:text-xl font-bold bg-clip-text text-transparent bg-gradient-to-r from-blue-400 to-purple-400 font-mono">0</span>
                             </div>
                         </div>
                     </div>
@@ -192,27 +187,23 @@ DASHBOARD_HTML = """
 
             <!-- 视图 2：极客日志终端 -->
             <div id="view-logs" class="hidden h-full max-w-6xl mx-auto flex flex-col glass-panel rounded-2xl overflow-hidden shadow-2xl">
-                <div class="bg-slate-900/80 px-4 py-2 border-b border-slate-700/50 flex items-center gap-2">
-                    <div class="w-3 h-3 rounded-full bg-rose-500"></div>
-                    <div class="w-3 h-3 rounded-full bg-amber-500"></div>
-                    <div class="w-3 h-3 rounded-full bg-emerald-500"></div>
-                    <span class="ml-4 text-xs text-slate-500 font-mono">root@vertex-proxy:~# tail -f /var/log/api.log</span>
+                <div class="bg-slate-900/80 px-3 md:px-4 py-2 border-b border-slate-700/50 flex items-center gap-2">
+                    <div class="w-2.5 h-2.5 md:w-3 md:h-3 rounded-full bg-rose-500"></div>
+                    <div class="w-2.5 h-2.5 md:w-3 md:h-3 rounded-full bg-amber-500"></div>
+                    <div class="w-2.5 h-2.5 md:w-3 md:h-3 rounded-full bg-emerald-500"></div>
+                    <span class="ml-2 md:ml-4 text-[10px] md:text-xs text-slate-500 font-mono">root@vertex-proxy:~# tail -f /var/log/api.log</span>
                 </div>
-                <div id="log-window" class="log-container p-4 flex-1 overflow-y-auto space-y-1 tracking-wide leading-relaxed">
+                <div id="log-window" class="log-container p-3 md:p-4 flex-1 overflow-y-auto space-y-1 tracking-wide leading-relaxed">
                     <!-- Logs injection here -->
                 </div>
             </div>
-
         </div>
     </main>
 
     <script>
-        // --- 核心逻辑 ---
         let chartInstance = null;
-
         function formatNumber(num) { return num.toLocaleString('en-US'); }
 
-        // 切换 Tab
         function switchTab(tabId) {
             document.querySelectorAll('.nav-item').forEach(el => el.classList.remove('active'));
             document.getElementById('nav-' + tabId).classList.add('active');
@@ -224,7 +215,6 @@ DASHBOARD_HTML = """
             document.getElementById('page-title').innerText = tabId === 'dashboard' ? '数据大盘' : '实时日志';
         }
 
-        // 初始化/更新图表
         function renderChart(success, error) {
             const ctx = document.getElementById('successChart').getContext('2d');
             if (chartInstance) {
@@ -242,11 +232,10 @@ DASHBOARD_HTML = """
                         borderWidth: 0, hoverOffset: 4
                     }]
                 },
-                options: { cutout: '75%', plugins: { legend: { display: false } } }
+                options: { maintainAspectRatio: false, cutout: '75%', plugins: { legend: { display: false } } }
             });
         }
 
-        // 获取后端监控数据
         async function fetchStats() {
             try {
                 const res = await fetch('/api/stats');
@@ -269,24 +258,23 @@ DASHBOARD_HTML = """
             }
         }
 
-        // --- 日志终端渲染逻辑 ---
         const logWindow = document.getElementById('log-window');
         let isAutoScroll = true;
+        
         logWindow.addEventListener('scroll', () => {
             isAutoScroll = logWindow.scrollHeight - logWindow.scrollTop - logWindow.clientHeight < 50;
         });
 
         function formatLogText(text) {
-            let color = "#94A3B8"; // Default slate
+            let color = "#94A3B8";
             if(text.includes("INFO") || text.includes("✅")) color = "#38BDF8";
             else if(text.includes("WARN") || text.includes("⚠️")) color = "#FBBF24";
             else if(text.includes("ERROR") || text.includes("❌")) color = "#F87171";
             else if(text.includes("💰")) color = "#D946EF";
             
-            // Highlight model names
             let safeText = text.replace(/</g, "&lt;").replace(/>/g, "&gt;");
             safeText = safeText.replace(/(gemini-[a-zA-Z0-9\-\.]+)/g, '<span class="text-emerald-400 font-bold">$1</span>');
-            return `<div style="color: ${color};">${safeText}</div>`;
+            return `<div style="color: ${color}; padding: 2px 0;">${safeText}</div>`;
         }
 
         const evtSource = new EventSource('/stream-logs');
@@ -296,7 +284,6 @@ DASHBOARD_HTML = """
             if (isAutoScroll) logWindow.scrollTop = logWindow.scrollHeight;
         };
 
-        // 启动轮询 (每 3 秒刷新一次面板数据)
         fetchStats();
         setInterval(fetchStats, 3000);
     </script>
