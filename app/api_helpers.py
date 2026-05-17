@@ -231,6 +231,7 @@ def create_generation_config(request: OpenAIRequest) -> Dict[str, Any]:
     is_image_model = "image" in request.model.lower()
     
     if is_image_model:
+        # 【致崩 Bug 修复】：必须包含 TEXT 模态，否则生图模型无法输出思考过程，直接 400 报错！
         config["response_modalities"] = ["TEXT", "IMAGE"]
         
         target_ar = "1:1"
@@ -252,13 +253,13 @@ def create_generation_config(request: OpenAIRequest) -> Dict[str, Any]:
                     target_ar = ar_match.group(1).replace("：", ":")
                 break
                 
-        # 彻底修复：使用官方原生的 image_config 结构，强力注入 4K 解析度
+        # 使用官方原生的 image_config 结构，强制 4K 级别大图
         config["image_config"] = types.ImageConfig(
             aspect_ratio=target_ar,
             image_size="4K"
         )
         
-        # 原生挂载 Google Search 工具，让 AI 生图前自己去查设定，不限制任何生图题材！
+        # 原生挂载 Google Search 工具，让 AI 生图前自己去查设定，绝不限制任何生图题材！
         tools_list.append(types.Tool(google_search=types.GoogleSearch()))
     # ==============================================================================
 
