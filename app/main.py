@@ -41,19 +41,19 @@ app.add_middleware(
 app.state.credential_manager = credential_manager
 app.state.express_key_manager = express_key_manager
 
-# 【统计器 Bug 彻底修复】：捕获 4xx/5xx 以及任何抛出异常的请求
+# 【精细化拦截统计】：区分 HTTP 4xx/5xx 以及系统内部崩溃
 @app.middleware("http")
 async def stats_tracker_middleware(request: Request, call_next):
     if "chat/completions" in request.url.path:
         try:
             response = await call_next(request)
             if response.status_code >= 400:
-                stats.add_request(success=False)
+                stats.add_request(success=False, is_error=True)
             else:
-                stats.add_request(success=True)
+                stats.add_request(success=True, is_error=False)
             return response
         except Exception as e:
-            stats.add_request(success=False)
+            stats.add_request(success=False, is_error=True)
             raise e
     return await call_next(request)
 
@@ -64,7 +64,7 @@ def verify_auth(credentials: HTTPBasicCredentials = Depends(security)):
     return credentials.username
 
 # ==========================================
-# 💎 全新现代化 API 仪表盘 HTML (清爽浅色 Light Mode)
+# 💎 现代流行感大屏 - Light Mode 精修版
 # ==========================================
 DASHBOARD_HTML = """
 <!DOCTYPE html>
@@ -75,65 +75,70 @@ DASHBOARD_HTML = """
     <title>Vertex2OpenAI | 管理控制台</title>
     <script src="https://cdn.tailwindcss.com"></script>
     <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet">
     <style>
-        body { background-color: #F8FAFC; color: #334155; font-family: 'Inter', system-ui, sans-serif; }
-        /* 浅色毛玻璃卡片 */
-        .glass-panel { background: rgba(255, 255, 255, 0.85); backdrop-filter: blur(12px); border: 1px solid rgba(226, 232, 240, 0.8); box-shadow: 0 4px 6px -1px rgba(0, 0, 0, 0.05), 0 2px 4px -1px rgba(0, 0, 0, 0.03); }
-        .log-container { font-family: 'Fira Code', monospace; font-size: 0.85rem; word-break: break-all; background: #FFFFFF; border: 1px solid #E2E8F0; color: #475569;}
+        body { background-color: #F8FAFC; color: #334155; font-family: 'Inter', sans-serif; }
         
-        .nav-item { cursor: pointer; transition: all 0.2s; border-left: 3px solid transparent; color: #64748B; font-weight: 500;}
+        /* 流行感磨砂玻璃卡片 */
+        .glass-panel { background: #FFFFFF; border: 1px solid #F1F5F9; box-shadow: 0 4px 20px -2px rgba(0, 0, 0, 0.03), 0 0 3px rgba(0,0,0,0.02); }
+        .log-container { font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace; font-size: 0.85rem; word-break: break-all; background: #FAFAF9; border: 1px solid #E5E7EB; color: #475569;}
+        
+        .nav-item { cursor: pointer; transition: all 0.25s ease; border-left: 3px solid transparent; color: #64748B; font-weight: 500;}
         .nav-item.active { background: #EFF6FF; border-left-color: #3B82F6; color: #2563EB; }
-        .nav-item:hover:not(.active) { background: #F1F5F9; color: #334155; }
+        .nav-item:hover:not(.active) { background: #F8FAFC; color: #334155; }
         
         @media (max-width: 768px) {
             .nav-item { border-left: none; border-bottom: 3px solid transparent; justify-content: center; flex: 1; }
-            .nav-item.active { border-bottom-color: #3B82F6; }
+            .nav-item.active { border-bottom-color: #3B82F6; background: #EFF6FF; }
         }
         
-        /* 细雅的滚动条 */
+        /* 清新风格滚动条 */
         ::-webkit-scrollbar { width: 6px; height: 6px; }
         ::-webkit-scrollbar-track { background: transparent; }
         ::-webkit-scrollbar-thumb { background: #CBD5E1; border-radius: 10px; }
         ::-webkit-scrollbar-thumb:hover { background: #94A3B8; }
         
-        /* 卡片数字特殊字体 */
-        .stat-value { font-family: 'Inter', system-ui, sans-serif; letter-spacing: -0.025em; }
+        .stat-value { letter-spacing: -0.03em; }
     </style>
 </head>
-<body class="h-screen flex flex-col md:flex-row overflow-hidden bg-[url('https://www.transparenttextures.com/patterns/cubes.png')] bg-opacity-50">
+<body class="h-screen flex flex-col md:flex-row overflow-hidden bg-slate-50/50">
     <!-- 左侧导航 -->
     <aside class="w-full md:w-64 glass-panel border-b md:border-b-0 md:border-r border-slate-200 flex flex-col z-20 flex-shrink-0">
-        <div class="h-14 md:h-16 flex items-center px-4 md:px-6 border-b border-slate-100 bg-white/50">
-            <div class="w-7 h-7 md:w-8 md:h-8 rounded-lg bg-gradient-to-br from-blue-500 to-indigo-500 flex items-center justify-center font-bold text-white shadow-md mr-3">V</div>
-            <span class="font-bold text-base md:text-lg tracking-wide text-slate-800">Vertex2OpenAI</span>
+        <div class="h-14 md:h-16 flex items-center px-4 md:px-6 border-b border-slate-100">
+            <div class="w-7 h-7 md:w-8 md:h-8 rounded-lg bg-gradient-to-br from-blue-500 to-indigo-600 flex items-center justify-center font-bold text-white shadow-sm mr-3">V</div>
+            <span class="font-bold text-base md:text-lg tracking-tight text-slate-800">Vertex2OpenAI</span>
         </div>
-        <nav class="flex flex-row md:flex-col py-0 md:py-4 overflow-x-auto bg-white/30 h-full">
-            <div onclick="switchTab('dashboard')" id="nav-dashboard" class="nav-item active px-4 py-3 md:px-6 md:py-3 flex items-center gap-2 whitespace-nowrap text-sm md:text-base">
+        <nav class="flex flex-row md:flex-col py-0 md:py-4 overflow-x-auto h-full">
+            <div onclick="switchTab('dashboard')" id="nav-dashboard" class="nav-item active px-4 py-3 md:px-6 md:py-3.5 flex items-center gap-2.5 whitespace-nowrap text-sm md:text-base">
                 <svg class="w-4 h-4 md:w-5 md:h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 6a2 2 0 012-2h2a2 2 0 012 2v2a2 2 0 01-2 2H6a2 2 0 01-2-2V6zM14 6a2 2 0 012-2h2a2 2 0 012 2v2a2 2 0 01-2 2h-2a2 2 0 01-2-2V6zM4 16a2 2 0 012-2h2a2 2 0 012 2v2a2 2 0 01-2 2H6a2 2 0 01-2-2v-2zM14 16a2 2 0 012-2h2a2 2 0 012 2v2a2 2 0 01-2 2h-2a2 2 0 01-2-2v-2z"></path></svg>
                 数据大盘
             </div>
-            <div onclick="switchTab('logs')" id="nav-logs" class="nav-item px-4 py-3 md:px-6 md:py-3 flex items-center gap-2 whitespace-nowrap text-sm md:text-base">
+            <div onclick="switchTab('logs')" id="nav-logs" class="nav-item px-4 py-3 md:px-6 md:py-3.5 flex items-center gap-2.5 whitespace-nowrap text-sm md:text-base">
                 <svg class="w-4 h-4 md:w-5 md:h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M8 9l3 3-3 3m5 0h3M5 20h14a2 2 0 002-2V6a2 2 0 00-2-2H5a2 2 0 00-2 2v12a2 2 0 002 2z"></path></svg>
-                实时日志
+                运行日志
             </div>
         </nav>
-        <div class="mt-auto px-6 py-4 hidden md:block bg-white/50 border-t border-slate-100">
-            <div class="bg-slate-50 rounded-lg p-4 border border-slate-200">
-                <div class="text-xs text-slate-500 mb-1 font-medium">System Status</div>
-                <div class="flex items-center gap-2">
-                    <span class="w-2.5 h-2.5 rounded-full bg-emerald-500 shadow-[0_0_8px_rgba(16,185,129,0.6)] animate-pulse"></span>
-                    <span class="text-sm text-emerald-600 font-semibold">运行正常</span>
+        <div class="mt-auto px-6 py-5 hidden md:block border-t border-slate-100">
+            <div class="bg-slate-50/80 rounded-xl p-4 border border-slate-200/60 shadow-sm">
+                <div class="text-[11px] text-slate-400 mb-1.5 font-semibold uppercase tracking-wider">系统状态</div>
+                <div class="flex items-center gap-2 mb-2">
+                    <span class="relative flex h-2.5 w-2.5">
+                      <span class="animate-ping absolute inline-flex h-full w-full rounded-full bg-emerald-400 opacity-75"></span>
+                      <span class="relative inline-flex rounded-full h-2.5 w-2.5 bg-emerald-500"></span>
+                    </span>
+                    <span class="text-sm text-emerald-600 font-semibold">Running</span>
                 </div>
+                <div class="text-xs text-slate-500" id="sys-uptime">已运行: 0.0 h</div>
             </div>
         </div>
     </aside>
 
     <!-- 右侧内容 -->
-    <main class="flex-1 flex flex-col relative z-10 overflow-hidden bg-[#F8FAFC]">
-        <header class="h-14 md:h-16 glass-panel border-b border-slate-200 flex items-center justify-between px-4 md:px-8 shrink-0 bg-white/80">
+    <main class="flex-1 flex flex-col relative z-10 overflow-hidden">
+        <header class="h-14 md:h-16 glass-panel border-b border-slate-200 flex items-center justify-between px-4 md:px-8 shrink-0">
             <h1 id="page-title" class="text-base md:text-lg font-bold text-slate-800 tracking-tight">数据大盘</h1>
             <button onclick="fetchStats()" class="bg-white hover:bg-slate-50 text-slate-600 px-3 py-1.5 md:px-4 md:py-2 rounded-lg text-xs md:text-sm transition-all border border-slate-200 shadow-sm flex items-center gap-2 font-medium">
-                <svg class="w-3 h-3 md:w-4 md:h-4 text-blue-500" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15"></path></svg>
+                <svg class="w-3.5 h-3.5 md:w-4 md:h-4 text-blue-500" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15"></path></svg>
                 <span class="hidden sm:inline">手动刷新</span>
             </button>
         </header>
@@ -141,55 +146,57 @@ DASHBOARD_HTML = """
         <div class="flex-1 overflow-y-auto p-4 md:p-8 relative">
             <!-- 视图 1：数据看板 -->
             <div id="view-dashboard" class="max-w-6xl mx-auto space-y-4 md:space-y-6">
-                <!-- 顶部 4 张卡片 -->
-                <div class="grid grid-cols-2 md:grid-cols-4 gap-4 md:gap-6">
-                    <div class="glass-panel p-4 md:p-6 rounded-2xl relative overflow-hidden group bg-white">
-                        <div class="absolute -right-6 -top-6 w-24 h-24 bg-blue-100 rounded-full blur-2xl group-hover:bg-blue-200 transition-all opacity-60"></div>
-                        <h3 class="text-slate-500 text-xs md:text-sm font-semibold mb-1 md:mb-2 uppercase tracking-wider">总请求次数</h3>
-                        <p id="stat-total" class="stat-value text-2xl md:text-4xl font-bold text-slate-800">0</p>
+                <!-- 顶部 4 张核心数据卡片 -->
+                <div class="grid grid-cols-2 md:grid-cols-4 gap-4 md:gap-5">
+                    <div class="glass-panel p-4 md:p-5 rounded-2xl relative overflow-hidden group">
+                        <div class="absolute -right-4 -top-4 w-20 h-20 bg-blue-50 rounded-full blur-2xl group-hover:bg-blue-100 transition-all"></div>
+                        <h3 class="text-slate-500 text-xs font-semibold mb-2 uppercase tracking-widest">总请求</h3>
+                        <p id="stat-total" class="stat-value text-2xl md:text-3xl font-bold text-slate-800">0</p>
                     </div>
-                    <div class="glass-panel p-4 md:p-6 rounded-2xl relative overflow-hidden group bg-white">
-                        <div class="absolute -right-6 -top-6 w-24 h-24 bg-emerald-100 rounded-full blur-2xl group-hover:bg-emerald-200 transition-all opacity-60"></div>
-                        <h3 class="text-slate-500 text-xs md:text-sm font-semibold mb-1 md:mb-2 uppercase tracking-wider">成功响应</h3>
-                        <p id="stat-success" class="stat-value text-2xl md:text-4xl font-bold text-emerald-600">0</p>
+                    <div class="glass-panel p-4 md:p-5 rounded-2xl relative overflow-hidden group">
+                        <div class="absolute -right-4 -top-4 w-20 h-20 bg-emerald-50 rounded-full blur-2xl group-hover:bg-emerald-100 transition-all"></div>
+                        <h3 class="text-slate-500 text-xs font-semibold mb-2 uppercase tracking-widest">成功响应</h3>
+                        <p id="stat-success" class="stat-value text-2xl md:text-3xl font-bold text-emerald-600">0</p>
                     </div>
-                    <div class="glass-panel p-4 md:p-6 rounded-2xl relative overflow-hidden group bg-white">
-                        <div class="absolute -right-6 -top-6 w-24 h-24 bg-rose-100 rounded-full blur-2xl group-hover:bg-rose-200 transition-all opacity-60"></div>
-                        <h3 class="text-slate-500 text-xs md:text-sm font-semibold mb-1 md:mb-2 uppercase tracking-wider">拦截/异常</h3>
-                        <p id="stat-error" class="stat-value text-2xl md:text-4xl font-bold text-rose-500">0</p>
+                    <!-- 重要的分流：黄色拥堵重试 -->
+                    <div class="glass-panel p-4 md:p-5 rounded-2xl relative overflow-hidden group">
+                        <div class="absolute -right-4 -top-4 w-20 h-20 bg-amber-50 rounded-full blur-2xl group-hover:bg-amber-100 transition-all"></div>
+                        <h3 class="text-slate-500 text-xs font-semibold mb-2 uppercase tracking-widest">API 拥堵重试</h3>
+                        <p id="stat-retries" class="stat-value text-2xl md:text-3xl font-bold text-amber-500">0</p>
                     </div>
-                    <div class="glass-panel p-4 md:p-6 rounded-2xl relative overflow-hidden group bg-white">
-                        <div class="absolute -right-6 -top-6 w-24 h-24 bg-indigo-100 rounded-full blur-2xl group-hover:bg-indigo-200 transition-all opacity-60"></div>
-                        <h3 class="text-slate-500 text-xs md:text-sm font-semibold mb-1 md:mb-2 uppercase tracking-wider">运行时长</h3>
-                        <p id="stat-uptime" class="stat-value text-2xl md:text-4xl font-bold text-indigo-600">0 h</p>
+                    <!-- 红色的死亡拦截 -->
+                    <div class="glass-panel p-4 md:p-5 rounded-2xl relative overflow-hidden group">
+                        <div class="absolute -right-4 -top-4 w-20 h-20 bg-rose-50 rounded-full blur-2xl group-hover:bg-rose-100 transition-all"></div>
+                        <h3 class="text-slate-500 text-xs font-semibold mb-2 uppercase tracking-widest">错误 / 拦截</h3>
+                        <p id="stat-error" class="stat-value text-2xl md:text-3xl font-bold text-rose-600">0</p>
                     </div>
                 </div>
 
-                <div class="grid grid-cols-1 lg:grid-cols-3 gap-4 md:gap-6">
-                    <div class="glass-panel p-4 md:p-6 rounded-2xl lg:col-span-1 flex flex-col items-center justify-center bg-white">
-                        <h3 class="text-slate-700 text-sm font-bold w-full text-left mb-4">请求成功率监控</h3>
-                        <div class="w-40 h-40 md:w-52 md:h-52 relative">
+                <div class="grid grid-cols-1 lg:grid-cols-3 gap-4 md:gap-5">
+                    <div class="glass-panel p-5 md:p-6 rounded-2xl lg:col-span-1 flex flex-col items-center justify-center">
+                        <h3 class="text-slate-800 text-sm font-bold w-full text-left mb-6">服务健康度</h3>
+                        <div class="w-40 h-40 md:w-48 md:h-48 relative">
                             <canvas id="successChart"></canvas>
                         </div>
                     </div>
-                    <div class="glass-panel p-4 md:p-6 rounded-2xl lg:col-span-2 flex flex-col justify-center bg-white">
-                        <h3 class="text-slate-700 text-sm font-bold mb-4 md:mb-6">Token 算力消耗量</h3>
-                        <div class="space-y-5 md:space-y-7">
+                    <div class="glass-panel p-5 md:p-6 rounded-2xl lg:col-span-2 flex flex-col justify-center">
+                        <h3 class="text-slate-800 text-sm font-bold mb-6">Token 算力消耗量</h3>
+                        <div class="space-y-6">
                             <div>
-                                <div class="flex justify-between text-xs md:text-sm mb-2">
-                                    <span class="text-slate-600 font-medium flex items-center gap-2"><span class="w-2.5 h-2.5 rounded-full bg-blue-500 shadow-sm"></span> Prompt Tokens</span>
+                                <div class="flex justify-between text-xs md:text-sm mb-2.5">
+                                    <span class="text-slate-600 font-medium flex items-center gap-2"><span class="w-2.5 h-2.5 rounded-full bg-blue-500"></span> Prompt (输入)</span>
                                     <span id="stat-prompt" class="font-mono text-blue-600 font-bold">0</span>
                                 </div>
-                                <div class="w-full bg-slate-100 rounded-full h-2 md:h-2.5 overflow-hidden border border-slate-200"><div class="bg-gradient-to-r from-blue-400 to-blue-500 h-full rounded-full" style="width: 80%"></div></div>
+                                <div class="w-full bg-slate-100 rounded-full h-2 overflow-hidden"><div class="bg-blue-500 h-full rounded-full" style="width: 80%"></div></div>
                             </div>
                             <div>
-                                <div class="flex justify-between text-xs md:text-sm mb-2">
-                                    <span class="text-slate-600 font-medium flex items-center gap-2"><span class="w-2.5 h-2.5 rounded-full bg-indigo-500 shadow-sm"></span> Completion Tokens</span>
+                                <div class="flex justify-between text-xs md:text-sm mb-2.5">
+                                    <span class="text-slate-600 font-medium flex items-center gap-2"><span class="w-2.5 h-2.5 rounded-full bg-indigo-500"></span> Completion (输出)</span>
                                     <span id="stat-comp" class="font-mono text-indigo-600 font-bold">0</span>
                                 </div>
-                                <div class="w-full bg-slate-100 rounded-full h-2 md:h-2.5 overflow-hidden border border-slate-200"><div class="bg-gradient-to-r from-indigo-400 to-indigo-500 h-full rounded-full" style="width: 60%"></div></div>
+                                <div class="w-full bg-slate-100 rounded-full h-2 overflow-hidden"><div class="bg-indigo-500 h-full rounded-full" style="width: 60%"></div></div>
                             </div>
-                            <div class="pt-4 md:pt-5 border-t border-slate-100 mt-4 md:mt-5 flex justify-between items-center">
+                            <div class="pt-5 border-t border-slate-100 mt-5 flex justify-between items-center">
                                 <span class="text-xs md:text-sm text-slate-500 font-bold uppercase tracking-wider">总计消耗 (Total)</span>
                                 <span id="stat-total-tokens" class="text-xl md:text-2xl font-bold text-slate-800 font-mono tracking-tight">0</span>
                             </div>
@@ -198,15 +205,17 @@ DASHBOARD_HTML = """
                 </div>
             </div>
 
-            <!-- 视图 2：极客日志终端 (浅色改良版) -->
-            <div id="view-logs" class="hidden h-full max-w-6xl mx-auto flex flex-col glass-panel rounded-2xl overflow-hidden shadow-lg border border-slate-200 bg-white">
-                <div class="bg-slate-50 px-3 md:px-4 py-2.5 border-b border-slate-200 flex items-center gap-2">
-                    <div class="w-2.5 h-2.5 md:w-3 md:h-3 rounded-full bg-rose-400 border border-rose-500"></div>
-                    <div class="w-2.5 h-2.5 md:w-3 md:h-3 rounded-full bg-amber-400 border border-amber-500"></div>
-                    <div class="w-2.5 h-2.5 md:w-3 md:h-3 rounded-full bg-emerald-400 border border-emerald-500"></div>
-                    <span class="ml-2 md:ml-4 text-[10px] md:text-xs text-slate-500 font-mono font-medium">server@vertex-proxy:~/logs$ tail -f app.log</span>
+            <!-- 视图 2：运行日志终端 (浅色轻量版) -->
+            <div id="view-logs" class="hidden h-full max-w-6xl mx-auto flex flex-col glass-panel rounded-2xl overflow-hidden">
+                <div class="bg-white px-4 py-3 border-b border-slate-200 flex items-center gap-2.5">
+                    <div class="flex gap-1.5">
+                        <div class="w-3 h-3 rounded-full bg-rose-400"></div>
+                        <div class="w-3 h-3 rounded-full bg-amber-400"></div>
+                        <div class="w-3 h-3 rounded-full bg-emerald-400"></div>
+                    </div>
+                    <span class="ml-3 text-[11px] md:text-xs text-slate-400 font-mono font-medium">terminal ~ 实时监控</span>
                 </div>
-                <div id="log-window" class="log-container p-3 md:p-5 flex-1 overflow-y-auto space-y-1.5 tracking-normal leading-relaxed text-sm shadow-inner bg-slate-50/50">
+                <div id="log-window" class="log-container p-4 md:p-5 flex-1 overflow-y-auto space-y-2 text-[13px]">
                     <!-- Logs injection here -->
                 </div>
             </div>
@@ -225,23 +234,31 @@ DASHBOARD_HTML = """
             document.getElementById('view-logs').classList.add('hidden');
             document.getElementById('view-' + tabId).classList.remove('hidden');
             
-            document.getElementById('page-title').innerText = tabId === 'dashboard' ? '数据大盘' : '实时日志';
+            document.getElementById('page-title').innerText = tabId === 'dashboard' ? '数据大盘' : '运行日志';
         }
 
-        function renderChart(success, error) {
+        function renderChart(success, error, retries) {
             const ctx = document.getElementById('successChart').getContext('2d');
+            // 环形图数据：绿（成功）、红（失败）、黄（重试事件）。如果全 0 则用个灰色的代替。
+            let dataArr = [success, error, retries];
+            let colorArr = ['#10B981', '#E11D48', '#F59E0B'];
+            if (success === 0 && error === 0 && retries === 0) {
+                dataArr = [1]; colorArr = ['#E2E8F0'];
+            }
+            
             if (chartInstance) {
-                chartInstance.data.datasets[0].data = [success, error || (success === 0 ? 1 : 0)];
+                chartInstance.data.datasets[0].data = dataArr;
+                chartInstance.data.datasets[0].backgroundColor = colorArr;
                 chartInstance.update();
                 return;
             }
             chartInstance = new Chart(ctx, {
                 type: 'doughnut',
                 data: {
-                    labels: ['成功', '异常'],
+                    labels: ['成功', '错误', '拥堵重试'],
                     datasets: [{
-                        data: [success, error || (success === 0 ? 1 : 0)],
-                        backgroundColor: ['#10B981', '#F43F5E'],
+                        data: dataArr,
+                        backgroundColor: colorArr,
                         borderWidth: 2, borderColor: '#FFFFFF', hoverOffset: 4
                     }]
                 },
@@ -257,15 +274,16 @@ DASHBOARD_HTML = """
                 document.getElementById('stat-total').innerText = formatNumber(data.total);
                 document.getElementById('stat-success').innerText = formatNumber(data.success);
                 document.getElementById('stat-error').innerText = formatNumber(data.error);
+                document.getElementById('stat-retries').innerText = formatNumber(data.retries);
                 
                 let hours = (data.uptime / 3600).toFixed(1);
-                document.getElementById('stat-uptime').innerText = hours + ' h';
+                document.getElementById('sys-uptime').innerText = '已运行: ' + hours + ' h';
                 
                 document.getElementById('stat-prompt').innerText = formatNumber(data.prompt_tokens);
                 document.getElementById('stat-comp').innerText = formatNumber(data.completion_tokens);
                 document.getElementById('stat-total-tokens').innerText = formatNumber(data.prompt_tokens + data.completion_tokens);
                 
-                renderChart(data.success, data.error);
+                renderChart(data.success, data.error, data.retries);
             } catch (e) {
                 console.error("Fetch stats failed", e);
             }
@@ -278,34 +296,36 @@ DASHBOARD_HTML = """
             isAutoScroll = logWindow.scrollHeight - logWindow.scrollTop - logWindow.clientHeight < 50;
         });
 
-        // 浅色主题日志配色优化
+        // 彻底优化的浅色 UI 日志分色
         function formatLogText(text) {
-            let color = "#475569"; // 默认浅灰色 (Slate-600)
+            let color = "#475569"; // 默认灰
             let bgColor = "transparent";
-            let borderLeft = "none";
+            let borderLeft = "3px solid transparent";
             
-            if(text.includes("INFO") || text.includes("✅")) {
-                color = "#0369A1"; // 深蓝色
+            if(text.includes("INFO") || text.includes("✅") || text.includes("🎉")) {
+                color = "#0369A1";
+                borderLeft = "3px solid #38BDF8";
             }
             else if(text.includes("WARN") || text.includes("⚠️")) {
-                color = "#B45309"; // 深橙色
-                bgColor = "#FEF3C7"; // 浅黄背景
+                color = "#B45309"; 
+                bgColor = "#FFFBEB"; 
                 borderLeft = "3px solid #F59E0B";
             }
             else if(text.includes("ERROR") || text.includes("❌")) {
-                color = "#B91C1C"; // 深红色
-                bgColor = "#FEE2E2"; // 浅红背景
-                borderLeft = "3px solid #EF4444";
+                color = "#BE123C"; 
+                bgColor = "#FEF2F2"; 
+                borderLeft = "3px solid #F43F5E";
             }
             else if(text.includes("💰")) {
-                color = "#7E22CE"; // 深紫色
+                color = "#6D28D9"; 
+                bgColor = "#FAF5FF";
+                borderLeft = "3px solid #A855F7";
             }
             
             let safeText = text.replace(/</g, "&lt;").replace(/>/g, "&gt;");
-            // 高亮模型名字
             safeText = safeText.replace(/(gemini-[a-zA-Z0-9\-\.]+)/g, '<span style="color: #059669; font-weight: 700;">$1</span>');
             
-            return `<div style="color: ${color}; background-color: ${bgColor}; border-left: ${borderLeft}; padding: 4px 8px; margin-bottom: 2px; border-radius: 2px;">${safeText}</div>`;
+            return `<div style="color: ${color}; background-color: ${bgColor}; border-left: ${borderLeft}; padding: 6px 10px; border-radius: 4px;">${safeText}</div>`;
         }
 
         const evtSource = new EventSource('/stream-logs');

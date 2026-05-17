@@ -20,17 +20,19 @@ from message_processing import (
     _create_safety_ratings_html
 )
 import config as app_config
+from config import VERTEX_REASONING_TAG
 
-# 引入报错统计器，统计拦截和重试
+# 引入报错统计器
 from logger import stats
 
 class StreamingReasoningProcessor:
-    def __init__(self):
-        # 强制使用标准的 think 标签
-        self.open_tag = "<think>"
-        self.close_tag = "</think>"
+    def __init__(self, tag_name: str = VERTEX_REASONING_TAG):
+        self.tag_name = tag_name
+        self.open_tag = f"<{tag_name}>"
+        self.close_tag = f"</{tag_name}>"
         self.tag_buffer = ""
         self.inside_tag = False
+        self._reasoning_chunks = []
         self.partial_tag_buffer = "" 
 
     def process_chunk(self, content: str) -> tuple[str, str]:
@@ -74,7 +76,8 @@ class StreamingReasoningProcessor:
                             partial_match = True
                             if len(self.tag_buffer) > i:
                                 new_reasoning = self.tag_buffer[:-i]
-                                current_reasoning_chunks.append(new_reasoning)
+                                self._reasoning_chunks.append(new_reasoning)
+                                if new_reasoning: current_reasoning_chunks.append(new_reasoning)
                                 self.partial_tag_buffer = self.tag_buffer[-i:]
                             else: 
                                 self.partial_tag_buffer = self.tag_buffer
@@ -82,11 +85,13 @@ class StreamingReasoningProcessor:
                             break
                     if not partial_match:
                         if self.tag_buffer:
+                            self._reasoning_chunks.append(self.tag_buffer)
                             current_reasoning_chunks.append(self.tag_buffer)
                             self.tag_buffer = ""
                     break
                 else:
                     final_reasoning_chunk = self.tag_buffer[:close_pos]
+                    self._reasoning_chunks.append(final_reasoning_chunk)
                     if final_reasoning_chunk: current_reasoning_chunks.append(final_reasoning_chunk)
                     
                     self.tag_buffer = self.tag_buffer[close_pos + len(self.close_tag):]
@@ -95,25 +100,23 @@ class StreamingReasoningProcessor:
         return "".join(processed_content_chunks), "".join(current_reasoning_chunks)
     
     def flush_remaining(self) -> tuple[str, str]:
-        # 彻底抛弃历史记录累加！只冲刷遗留缓冲区，防止前端显示两次
-        remaining_content = ""
-        remaining_reasoning = ""
-        
+        remaining_content_chunks = []
         if self.partial_tag_buffer:
-            if self.inside_tag:
-                remaining_reasoning += self.partial_tag_buffer
-            else:
-                remaining_content += self.partial_tag_buffer
+            remaining_content_chunks.append(self.partial_tag_buffer)
             self.partial_tag_buffer = ""
             
-        if self.tag_buffer:
-            if self.inside_tag:
-                remaining_reasoning += self.tag_buffer
-            else:
-                remaining_content += self.tag_buffer
-            self.tag_buffer = ""
+        if not self.inside_tag:
+            if self.tag_buffer: remaining_content_chunks.append(self.tag_buffer)
+        else:
+            if self.tag_buffer: self._reasoning_chunks.append(self.tag_buffer)
+            self.inside_tag = False
             
-        self.inside_tag = False
+        remaining_content = "".join(remaining_content_chunks)
+        remaining_reasoning = "".join(self._reasoning_chunks)
+        
+        self.tag_buffer = ""
+        self._reasoning_chunks.clear()
+        
         return remaining_content, remaining_reasoning
     
 
@@ -141,9 +144,10 @@ def is_retryable_exception(e):
 def log_retry_attempt(retry_state):
     attempt = retry_state.attempt_number
     e = retry_state.outcome.exception()
-    # 【打通仪表盘】：每一次 Google 的拦截或重试都会被记录为错误！
-    stats.add_request(success=False)
-    print(f"⚠️ 触发神性护盾 (API {e.__class__.__name__}): 遇到速率限制或异常。正在进行第 {attempt} 次自动重试...")
+    
+    # 【Bug 修复】：这里触发的只是重试，不计入死局错误，而是计入黄色的“API自动重试”卡片
+    stats.add_retry()
+    print(f"⚠️ [API 自动重试] 遇到上游拥堵或短暂拒绝 ({e.__class__.__name__})。正在进行第 {attempt} 次护盾退避重试...")
 
 @retry(
     stop=stop_after_attempt(20),
@@ -173,11 +177,10 @@ def create_generation_config(request: OpenAIRequest) -> Dict[str, Any]:
                         system_texts.append(part.get('text', ''))
                     elif hasattr(part, 'text') and isinstance(part.text, str):
                         system_texts.append(part.text)
+                        
+    # 生图模型不污染系统提示词，交由专用 image_generation_config 处理
     if system_texts and "image" not in request.model.lower():
         config["system_instruction"] = "\n".join(system_texts)
-    
-    if "image" in request.model.lower():
-        config["response_modalities"] = ["IMAGE"]
     
     if request.temperature is not None: config["temperature"] = request.temperature
     if request.max_tokens is not None: config["max_output_tokens"] = request.max_tokens
@@ -187,7 +190,6 @@ def create_generation_config(request: OpenAIRequest) -> Dict[str, Any]:
     if request.seed is not None: config["seed"] = request.seed
     if request.n is not None: config["candidate_count"] = request.n
     
-    # 设定高门槛拦截与概率评估法
     safety_threshold = "BLOCK_NONE"
     safety_method = "PROBABILITY"
     
@@ -223,8 +225,52 @@ def create_generation_config(request: OpenAIRequest) -> Dict[str, Any]:
                     if declaration.get("name"): 
                         function_declarations.append(declaration)
 
+    # =============== 生图专属官方配置 (4K/高级比例/联网搜图) ===============
+    is_image_model = "image" in request.model.lower()
+    tools_list = []
+    
     if function_declarations:
-        config["tools"] = [{"function_declarations": function_declarations}]
+        tools_list.append({"function_declarations": function_declarations})
+
+    if is_image_model:
+        config["response_modalities"] = ["IMAGE"]
+        
+        # 提取动态分辨率/比例 (不通过系统提示词污染)
+        target_ar = "1:1"
+        req_dict = request.model_dump()
+        size_param = req_dict.get("size")
+        if size_param:
+            if size_param in ["1024x1024", "1:1"]: target_ar = "1:1"
+            elif size_param in ["1024x768", "4:3"]: target_ar = "4:3"
+            elif size_param in ["768x1024", "3:4"]: target_ar = "3:4"
+            elif size_param in ["16:9", "9:16"]: target_ar = size_param
+            
+        for msg in reversed(request.messages):
+            if msg.role == "user":
+                content = ""
+                if isinstance(msg.content, str): content = msg.content
+                elif isinstance(msg.content, list): content = " ".join([p.get("text", "") for p in msg.content if isinstance(p, dict) and p.get("type") == "text"])
+                ar_match = re.search(r'(?i)(?:--ar\s+)?(1[:：]1|16[:：]9|9[:：]16|3[:：]4|4[:：]3|21[:：]9|9[:：]21)', content)
+                if ar_match:
+                    target_ar = ar_match.group(1).replace("：", ":")
+                break
+                
+        # 调用官方底层 image_generation_config 设定 4K 无压缩参数
+        config["image_generation_config"] = {
+            "aspect_ratio": target_ar,
+            "person_generation": "ALLOW_ALL",
+            "output_mime_type": "image/jpeg",
+            "media_resolution": "HIGH",     # 强开超高解析度
+            "quality": "HIGH",              # 强开最佳渲染品质
+            "sample_image_size": "4K"       # 原生注入 4K 请求 (解决 1K 限制)
+        }
+        
+        # 强制生图模型开启联网功能：生图前必须去谷歌核查动漫、实体的长相！
+        tools_list.append({"google_search": {}})
+    # ====================================================================
+
+    if tools_list:
+        config["tools"] = tools_list
 
     tool_config = None
     if request.tool_choice:
@@ -247,6 +293,7 @@ def create_generation_config(request: OpenAIRequest) -> Dict[str, Any]:
     if tool_config: config["tool_config"] = tool_config
         
     return config
+
 
 def is_gemini_response_valid(response: Any) -> bool:
     if response is None: return False
@@ -454,7 +501,7 @@ async def openai_fake_stream_generator(
                 choice_message_ref = first_choice_dict_item.get("message", {})
                 original_content = choice_message_ref.get("content")
                 if isinstance(original_content, str):
-                    reasoning_text, actual_content = extract_reasoning_by_tags(original_content, "think")
+                    reasoning_text, actual_content = extract_reasoning_by_tags(original_content, VERTEX_REASONING_TAG)
                     choice_message_ref["content"] = actual_content
                     if reasoning_text:
                         choice_message_ref["reasoning_content"] = reasoning_text

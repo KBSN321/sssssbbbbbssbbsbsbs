@@ -14,17 +14,24 @@ class ProxyStats:
         self.total_requests = 0
         self.success_requests = 0
         self.error_requests = 0
+        self.retry_counts = 0  # 新增：独立统计拥堵重试次数
         self.prompt_tokens = 0
         self.completion_tokens = 0
         self.lock = threading.Lock()
 
-    def add_request(self, success=True):
+    def add_request(self, success=True, is_error=False):
         with self.lock:
-            self.total_requests += 1
             if success:
+                self.total_requests += 1
                 self.success_requests += 1
-            else:
+            elif is_error:
+                self.total_requests += 1
                 self.error_requests += 1
+
+    def add_retry(self):
+        # 仅增加重试次数，不计入总请求和报错
+        with self.lock:
+            self.retry_counts += 1
 
     def add_tokens(self, p_tokens, c_tokens):
         with self.lock:
@@ -38,6 +45,7 @@ class ProxyStats:
             "total": self.total_requests,
             "success": self.success_requests,
             "error": self.error_requests,
+            "retries": self.retry_counts,
             "prompt_tokens": self.prompt_tokens,
             "completion_tokens": self.completion_tokens
         }
