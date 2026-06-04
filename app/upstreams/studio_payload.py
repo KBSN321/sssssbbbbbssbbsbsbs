@@ -1,3 +1,4 @@
+import copy
 from typing import Any
 from pydantic import BaseModel
 from models import OpenAIRequest
@@ -13,7 +14,6 @@ def serialize_pydantic(obj: Any) -> Any:
         return [serialize_pydantic(x) for x in obj]
     return obj
 
-# 谷歌 Web 私有 GraphQL API 所期望的 camelCase 属性键映射表
 KEY_MAP = {
     "max_output_tokens": "maxOutputTokens",
     "stop_sequences": "stopSequences",
@@ -52,59 +52,53 @@ def convert_keys_to_camel(obj: Any) -> Any:
 
 def build_studio_graphql_payload(model_name: str, request: OpenAIRequest, gen_config_dict: dict, auth_bundle: dict) -> dict:
     """
-    动态结合浏览器抓取的 requestContext 和 querySignature，
-    组装出与谷歌前端最新构建完全吻合的 GraphQL 私有网关请求载荷
+    【100% 真实伪装克隆】
+    直接深拷贝油猴脚本抓取到的原生 Payload，绝不破坏谷歌内部的实验标志和安全校验层级。
+    仅覆盖对话数据和用户指定的配置。
     """
-    # 动态捕获上下文
-    harvested_body = auth_bundle.get("body", {})
-    request_context = harvested_body.get("requestContext")
-    query_signature = harvested_body.get("querySignature")
-    operation_name = harvested_body.get("operationName", "StreamGenerateContentAnonymous")
+    # 1. 深度克隆抓取到的原生 Body，保留一切隐藏环境特征
+    payload = copy.deepcopy(auth_bundle.get("body", {}))
     
-    if not request_context or not query_signature:
-        print("⚠️ [Web Proxy] 警告：当前 Auth Bundle 数据不完整，可能面临请求拒绝！")
-
-    # 4. 动态构建符合当前 GCP Project 环境的模型全路径
-    project_id = request_context.get("projectId") if request_context else None
-    if project_id and not model_name.startswith("projects/"):
-        model_name = f"projects/{project_id}/locations/global/publishers/google/models/{model_name}"
-
-    # 1. 编译 OpenAI 消息历史，并一键完成 Pydantic 剥离和驼峰转换
+    if "variables" not in payload:
+        payload["variables"] = {}
+    variables = payload["variables"]
+    
+    # 2. 注入经过驼峰转换的聊天记录
     raw_contents = create_gemini_prompt(request.messages)
     camel_contents = convert_keys_to_camel(serialize_pydantic(raw_contents))
+    variables["contents"] = camel_contents
     
-    # 2. 转换参数配置
-    camel_config = convert_keys_to_camel(serialize_pydantic(gen_config_dict))
-    
-    # 从配置中摘出系统指令与安全配置
-    system_instruction = camel_config.pop("systemInstruction", None)
-    safety_settings = camel_config.get("safetySettings", [
-        {"category": "HARM_CATEGORY_HATE_SPEECH", "threshold": "BLOCK_NONE"},
-        {"category": "HARM_CATEGORY_DANGEROUS_CONTENT", "threshold": "BLOCK_NONE"},
-        {"category": "HARM_CATEGORY_SEXUALLY_EXPLICIT", "threshold": "BLOCK_NONE"},
-        {"category": "HARM_CATEGORY_HARASSMENT", "threshold": "BLOCK_NONE"}
-    ])
-
-    # 3. 构造 Web 端请求
-    payload = {
-        "operationName": operation_name,
-        "querySignature": query_signature,
-        "variables": {
-            "model": model_name,
-            "contents": camel_contents,
-            "generationConfig": camel_config,
-            "safetySettings": safety_settings,
-        }
-    }
-    
-    # 深度克隆抓取到的环境会话指纹
-    if request_context:
-        payload["requestContext"] = request_context
+    # 3. 动态拼接最新的模型名称（保留原有的 Project ID 前缀结构）
+    harvested_model = variables.get("model", "")
+    if harvested_model and "/" in harvested_model:
+        parts = harvested_model.split("/")
+        parts[-1] = model_name
+        variables["model"] = "/".join(parts)
+    else:
+        variables["model"] = model_name
         
-    if system_instruction:
-        if isinstance(system_instruction, dict):
-            payload["variables"]["systemInstruction"] = system_instruction
-        else:
-            payload["variables"]["systemInstruction"] = {"parts": [{"text": str(system_instruction)}]}
-            
+    # 4. 覆盖请求的推理参数
+    if "generationConfig" not in variables:
+        variables["generationConfig"] = {}
+    gc = variables["generationConfig"]
+    
+    if request.temperature is not None: gc["temperature"] = request.temperature
+    if request.max_tokens is not None: gc["maxOutputTokens"] = request.max_tokens
+    if request.top_p is not None: gc["topP"] = request.top_p
+    if request.stop is not None: gc["stopSequences"] = request.stop
+
+    # 注入思考模型参数
+    if "gemini-3" in model_name or "gemini-2.5" in model_name:
+        gc["thinkingConfig"] = {
+            "includeThoughts": True,
+            "thinkingLevel": "MEDIUM"
+        }
+    else:
+        gc.pop("thinkingConfig", None)
+
+    # 5. 注入系统指令
+    system_texts = [m.content for m in request.messages if m.role == "system" and isinstance(m.content, str)]
+    if system_texts:
+        variables["systemInstruction"] = {"parts": [{"text": "\n".join(system_texts)}]}
+        
     return payload
