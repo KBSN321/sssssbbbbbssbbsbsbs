@@ -1,8 +1,10 @@
 import json
-import httpx
+import time
 import traceback
 from fastapi import Request
 from fastapi.responses import StreamingResponse, JSONResponse
+# 核心杀器：使用 curl_cffi 替换 httpx，完美绕过谷歌的 TLS 指纹秒杀！
+from curl_cffi import requests
 
 from models import OpenAIRequest
 from upstreams.base import BaseUpstream
@@ -15,7 +17,6 @@ from stream_engine.processor import StreamProcessor
 class WebProxyUpstream(BaseUpstream):
     """
     谷歌 Agent Platform Studio 网页反代渠道处理器
-    加入底层 HTTP/1.1 降维打击与全套浏览器人皮伪装机制
     """
     async def chat_completions(self, request_obj: OpenAIRequest, fastapi_request: Request):
         auth_bundle = app_state.get_auth_bundle()
@@ -38,51 +39,49 @@ class WebProxyUpstream(BaseUpstream):
         
         if is_search:
             payload["variables"].setdefault("tools", []).append({"googleSearch": {}})
-            print(f"🔎 [搜索增强] 已为 Web 模式模型挂载 googleSearch 插件。")
 
         url = auth_bundle.get("url")
         raw_headers = auth_bundle.get("headers", {}).copy()
         
-        # 1. 全部键名转换为小写
         headers = {k.lower(): str(v) for k, v in raw_headers.items()}
-        
-        # 2. 补全防跨站安全头
         headers["referer"] = "https://console.cloud.google.com/"
         headers["origin"] = "https://console.cloud.google.com"
         
-        # 3. 剥离可能导致解压乱码或重算冲突的头
         headers.pop("accept-encoding", None)
         headers.pop("content-length", None)
-        # 不要手动设置 content-type，交由 httpx.post(json=payload) 自动推导并设置长度
+        headers.pop("host", None)
 
         # ==========================================
-        # 核心修复：关闭 HTTP/2 严格指纹校验，降级为 HTTP/1.1
-        # 极大提升绕过谷歌 GFE 网关 IP+TLS 复合校验的成功率
+        # 终极修复：启用 Chrome 124 浏览器底层指纹伪装 (Impersonate)
+        # 谷歌网关将无法识别出这是 Python 脚本，不再拦截 Cookie！
         # ==========================================
         client_kwargs = {
             "timeout": 120.0,
-            "follow_redirects": True,
-            "http2": False  
+            "impersonate": "chrome124"  
         }
         if app_config.PROXY_URL:
             client_kwargs["proxy"] = app_config.PROXY_URL
-        if app_config.SSL_CERT_FILE:
-            client_kwargs["verify"] = app_config.SSL_CERT_FILE
 
         if request_obj.stream:
             async def stream_generator():
                 try:
                     processor = StreamProcessor()
                     processor.enable_debug(True)
-                    async with httpx.AsyncClient(**client_kwargs) as client:
-                        async with client.stream("POST", url, headers=headers, json=payload) as response:
-                            if response.status_code != 200:
-                                error_text = await response.aread()
-                                yield f"data: {json.dumps({'error': f'Studio Error {response.status_code}: {error_text.decode()}'})}\n\n"
-                                return
-                            
-                            async for sse_event in processor.process_stream(response.aiter_text(), model=request_obj.model):
-                                yield sse_event
+                    async with requests.AsyncSession(**client_kwargs) as client:
+                        response = await client.post(url, headers=headers, json=payload, stream=True)
+                        if response.status_code != 200:
+                            error_text = await response.aread()
+                            yield f"data: {json.dumps({'error': f'Studio Error {response.status_code}: {error_text.decode()}'})}\n\n"
+                            return
+                        
+                        # curl_cffi 的专属异步流读取器
+                        async def line_iterator():
+                            async for line in response.aiter_lines():
+                                if line:
+                                    yield line.decode('utf-8') if isinstance(line, bytes) else line
+
+                        async for sse_event in processor.process_stream(line_iterator(), model=request_obj.model):
+                            yield sse_event
                 except Exception as e:
                     print("❌ [Web Proxy 异常中断] 详细网络或解析堆栈如下：")
                     traceback.print_exc()
@@ -98,31 +97,36 @@ class WebProxyUpstream(BaseUpstream):
             
             processor = StreamProcessor()
             processor.enable_debug(True)
-            async with httpx.AsyncClient(**client_kwargs) as client:
+            async with requests.AsyncSession(**client_kwargs) as client:
                 try:
-                    async with client.stream("POST", url, headers=headers, json=payload) as response:
-                        if response.status_code != 200:
-                            error_text = await response.aread()
-                            return JSONResponse(status_code=response.status_code, content={"error": error_text.decode()})
-                        
-                        async for sse_event in processor.process_stream(response.aiter_text(), model=request_obj.model):
-                            if sse_event.startswith("data: "):
-                                data_str = sse_event[6:].strip()
-                                if data_str == "[DONE]":
-                                    continue
-                                try:
-                                    chunk = json.loads(data_str)
-                                    choices = chunk.get("choices", [])
-                                    if choices:
-                                        delta = choices[0].get("delta", {})
-                                        if "content" in delta and delta["content"] is not None:
-                                            full_text += delta["content"]
-                                        if "reasoning_content" in delta and delta["reasoning_content"] is not None:
-                                            reasoning_text += delta["reasoning_content"]
-                                        if choices[0].get("finish_reason"):
-                                            final_finish_reason = choices[0]["finish_reason"]
-                                except Exception:
-                                    pass
+                    response = await client.post(url, headers=headers, json=payload, stream=True)
+                    if response.status_code != 200:
+                        error_text = await response.aread()
+                        return JSONResponse(status_code=response.status_code, content={"error": error_text.decode()})
+                    
+                    async def line_iterator():
+                        async for line in response.aiter_lines():
+                            if line:
+                                yield line.decode('utf-8') if isinstance(line, bytes) else line
+
+                    async for sse_event in processor.process_stream(line_iterator(), model=request_obj.model):
+                        if sse_event.startswith("data: "):
+                            data_str = sse_event[6:].strip()
+                            if data_str == "[DONE]":
+                                continue
+                            try:
+                                chunk = json.loads(data_str)
+                                choices = chunk.get("choices", [])
+                                if choices:
+                                    delta = choices[0].get("delta", {})
+                                    if "content" in delta and delta["content"] is not None:
+                                        full_text += delta["content"]
+                                    if "reasoning_content" in delta and delta["reasoning_content"] is not None:
+                                        reasoning_text += delta["reasoning_content"]
+                                    if choices[0].get("finish_reason"):
+                                        final_finish_reason = choices[0]["finish_reason"]
+                            except Exception:
+                                pass
                 except Exception as e:
                     print("❌ [Web Proxy 非流式异常] 详细网络或解析堆栈如下：")
                     traceback.print_exc()
