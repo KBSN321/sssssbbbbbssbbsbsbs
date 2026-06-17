@@ -2,36 +2,79 @@ import time
 import httpx
 import asyncio
 import secrets
-from fastapi import FastAPI, Depends, Request, HTTPException
+from fastapi import FastAPI, Depends, Request, HTTPException, Response
 from fastapi.responses import HTMLResponse, StreamingResponse, JSONResponse
 from fastapi.security import HTTPBasic, HTTPBasicCredentials
 from fastapi.middleware.cors import CORSMiddleware
 from contextlib import asynccontextmanager
+from pydantic import BaseModel
 
 from auth import get_api_key
 from express_key_manager import ExpressKeyManager
 from routes import models_api, chat_api
 
-# 引入重写后的日志模块
 from logger import rt_logger, stats
 import config
+from runtime_state import app_state
+
+from cookie_auth import validate_cookie
 
 express_key_manager = ExpressKeyManager()
+_global_browser = None
+
+async def run_headless_browser():
+    """后台运行无头浏览器（仅本地环境可选，云端请用 Cookie 直连模式）"""
+    global _global_browser
+    try:
+        from headless.browser import HeadlessBrowser
+        from headless.harvester import CredentialHarvester
+    except ImportError:
+        print("⚠️ Playwright 未安装，无头浏览器不可用。请使用 Cookie 直连模式。")
+        return
+
+    browser = HeadlessBrowser()
+    _global_browser = browser
+    
+    harvester = CredentialHarvester(on_credentials=lambda creds: app_state.update_auth_bundle(creds))
+    
+    if not await browser.start(headless=config.HEADLESS_MODE):
+        print("❌ 无头浏览器启动失败。请改用 Cookie 直连模式（在大盘中粘贴 Cookie + Project ID）。")
+        _global_browser = None
+        return
+        
+    await browser.setup_request_interception(harvester.handle_request)
+    
+    if await browser.navigate_to_vertex():
+        await browser.send_test_message()
+        
+        while browser.is_running:
+            await asyncio.sleep(config.CREDENTIAL_REFRESH_INTERVAL)
+            if browser.is_running:
+                try:
+                    await browser.send_test_message()
+                except Exception as e:
+                    print(f"⚠️ 定时刷新异常: {e}")
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     from model_loader import refresh_models_config_cache
-    print("🚀 [服务启动] Vertex2OpenAI 已切换为 Gemini Express Mode 专用模式。")
+    print("🚀 [服务启动] Vertex2OpenAI 已启动多模式多进程守护层。")
     if express_key_manager.get_total_keys() > 0:
         print(f"✅ [密钥配置] 已加载 {express_key_manager.get_total_keys()} 个 Express API Key。")
     else:
-        print("⚠️ [密钥配置] 未配置 VERTEX_EXPRESS_API_KEY，聊天接口会返回认证错误。")
+        print("⚠️ [密钥配置] 未检测到 VERTEX_EXPRESS_API_KEY。若不启用网页反代，聊天请求将会报错。")
     await refresh_models_config_cache()
+    
+    # 根据大盘配置启动无头浏览器
+    if app_state.is_web_proxy_enabled():
+        asyncio.create_task(run_headless_browser())
+        
     yield
+    if _global_browser and _global_browser.is_running:
+        await _global_browser.close()
 
 app = FastAPI(title="OpenAI to Gemini Adapter", lifespan=lifespan)
 
-# CORS 配置
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
@@ -42,18 +85,17 @@ app.add_middleware(
 
 app.state.express_key_manager = express_key_manager
 
-# 【精细化拦截统计】：区分 HTTP 4xx/5xx 以及系统内部崩溃
 @app.middleware("http")
 async def stats_tracker_middleware(request: Request, call_next):
     if "chat/completions" in request.url.path:
-        stats.increment_total()  # 进站时：增加总请求计数
+        stats.increment_total()
         try:
             response = await call_next(request)
             if response.status_code >= 400:
-                stats.add_error()  # 出站时：如果是异常状态码，登记错误响应
+                stats.add_error()
             return response
         except Exception as e:
-            stats.add_error()  # 出站时：如果执行崩溃，登记错误响应
+            stats.add_error()
             raise e
     return await call_next(request)
 
@@ -64,7 +106,7 @@ def verify_auth(credentials: HTTPBasicCredentials = Depends(security)):
     return credentials.username
 
 # ==========================================
-# 💎 现代流行感大屏 - Light Mode 精修版
+# 💎 现代控制大盘 - 集成 Web 模式控制
 # ==========================================
 DASHBOARD_HTML = """
 <!DOCTYPE html>
@@ -75,34 +117,26 @@ DASHBOARD_HTML = """
     <title>Vertex2OpenAI | 管理控制台</title>
     <script src="https://cdn.tailwindcss.com"></script>
     <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
-    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet">
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght=400;500;600;700&display=swap" rel="stylesheet">
     <style>
         body { background-color: #F8FAFC; color: #334155; font-family: 'Inter', sans-serif; }
-        
-        /* 流行感磨砂玻璃卡片 */
         .glass-panel { background: #FFFFFF; border: 1px solid #F1F5F9; box-shadow: 0 4px 20px -2px rgba(0, 0, 0, 0.03), 0 0 3px rgba(0,0,0,0.02); }
         .log-container { font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace; font-size: 0.85rem; word-break: break-all; background: #FAFAF9; border: 1px solid #E5E7EB; color: #475569;}
-        
         .nav-item { cursor: pointer; transition: all 0.25s ease; border-left: 3px solid transparent; color: #64748B; font-weight: 500;}
         .nav-item.active { background: #EFF6FF; border-left-color: #3B82F6; color: #2563EB; }
         .nav-item:hover:not(.active) { background: #F8FAFC; color: #334155; }
-        
         @media (max-width: 768px) {
             .nav-item { border-left: none; border-bottom: 3px solid transparent; justify-content: center; flex: 1; }
             .nav-item.active { border-bottom-color: #3B82F6; background: #EFF6FF; }
         }
-        
-        /* 清新风格滚动条 */
         ::-webkit-scrollbar { width: 6px; height: 6px; }
         ::-webkit-scrollbar-track { background: transparent; }
         ::-webkit-scrollbar-thumb { background: #CBD5E1; border-radius: 10px; }
         ::-webkit-scrollbar-thumb:hover { background: #94A3B8; }
-        
         .stat-value { letter-spacing: -0.03em; }
     </style>
 </head>
 <body class="h-screen flex flex-col md:flex-row overflow-hidden bg-slate-50/50">
-    <!-- 左侧导航 -->
     <aside class="w-full md:w-64 glass-panel border-b md:border-b-0 md:border-r border-slate-200 flex flex-col z-20 flex-shrink-0">
         <div class="h-14 md:h-16 flex items-center px-4 md:px-6 border-b border-slate-100">
             <div class="w-7 h-7 md:w-8 md:h-8 rounded-lg bg-gradient-to-br from-blue-500 to-indigo-600 flex items-center justify-center font-bold text-white shadow-sm mr-3">V</div>
@@ -133,38 +167,99 @@ DASHBOARD_HTML = """
         </div>
     </aside>
 
-    <!-- 右侧内容 -->
     <main class="flex-1 flex flex-col relative z-10 overflow-hidden">
         <header class="h-14 md:h-16 glass-panel border-b border-slate-200 flex items-center justify-between px-4 md:px-8 shrink-0">
             <h1 id="page-title" class="text-base md:text-lg font-bold text-slate-800 tracking-tight">数据大盘</h1>
         </header>
 
         <div class="flex-1 overflow-y-auto p-4 md:p-8 relative">
-            <!-- 视图 1：数据看板 -->
             <div id="view-dashboard" class="max-w-6xl mx-auto space-y-4 md:space-y-6">
-                <!-- 顶部 4 张核心数据卡片 -->
+                <!-- 顶部指标网格 -->
                 <div class="grid grid-cols-2 md:grid-cols-4 gap-4 md:gap-5">
                     <div class="glass-panel p-4 md:p-5 rounded-2xl relative overflow-hidden group">
-                        <div class="absolute -right-4 -top-4 w-20 h-20 bg-blue-50 rounded-full blur-2xl group-hover:bg-blue-100 transition-all"></div>
+                        <div class="absolute -right-4 -top-4 w-20 h-20 bg-blue-50 rounded-full blur-2xl"></div>
                         <h3 class="text-slate-500 text-xs font-semibold mb-2 uppercase tracking-widest">总请求</h3>
                         <p id="stat-total" class="stat-value text-2xl md:text-3xl font-bold text-slate-800">0</p>
                     </div>
                     <div class="glass-panel p-4 md:p-5 rounded-2xl relative overflow-hidden group">
-                        <div class="absolute -right-4 -top-4 w-20 h-20 bg-emerald-50 rounded-full blur-2xl group-hover:bg-emerald-100 transition-all"></div>
+                        <div class="absolute -right-4 -top-4 w-20 h-20 bg-emerald-50 rounded-full blur-2xl"></div>
                         <h3 class="text-slate-500 text-xs font-semibold mb-2 uppercase tracking-widest">成功响应</h3>
                         <p id="stat-success" class="stat-value text-2xl md:text-3xl font-bold text-emerald-600">0</p>
                     </div>
-                    <!-- 重要的分流：黄色拥堵重试 -->
                     <div class="glass-panel p-4 md:p-5 rounded-2xl relative overflow-hidden group">
-                        <div class="absolute -right-4 -top-4 w-20 h-20 bg-amber-50 rounded-full blur-2xl group-hover:bg-amber-100 transition-all"></div>
+                        <div class="absolute -right-4 -top-4 w-20 h-20 bg-amber-50 rounded-full blur-2xl"></div>
                         <h3 class="text-slate-500 text-xs font-semibold mb-2 uppercase tracking-widest">API 拥堵重试</h3>
                         <p id="stat-retries" class="stat-value text-2xl md:text-3xl font-bold text-amber-500">0</p>
                     </div>
-                    <!-- 红色的死亡拦截 -->
                     <div class="glass-panel p-4 md:p-5 rounded-2xl relative overflow-hidden group">
-                        <div class="absolute -right-4 -top-4 w-20 h-20 bg-rose-50 rounded-full blur-2xl group-hover:bg-rose-100 transition-all"></div>
+                        <div class="absolute -right-4 -top-4 w-20 h-20 bg-rose-50 rounded-full blur-2xl"></div>
                         <h3 class="text-slate-500 text-xs font-semibold mb-2 uppercase tracking-widest">错误 / 拦截</h3>
                         <p id="stat-error" class="stat-value text-2xl md:text-3xl font-bold text-rose-600">0</p>
+                    </div>
+                </div>
+
+                <!-- 模式切换控制面板卡片 -->
+                <div class="glass-panel p-5 md:p-6 rounded-2xl">
+                    <h3 class="text-slate-800 text-sm font-bold mb-4 flex items-center gap-2">
+                        <svg class="w-4 h-4 text-indigo-500" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M10.325 4.317c.426-1.756 2.924-1.756 3.35 0a1.724 1.724 0 002.573 1.066c1.543-.94 3.31.826 2.37 2.37a1.724 1.724 0 001.065 2.572c1.756.426 1.756 2.924 0 3.35a1.724 1.724 0 00-1.066 2.573c.94 1.543-.826 3.31-2.37 2.37a1.724 1.724 0 00-2.572 1.065c-.426 1.756-2.924 1.756-3.35 0a1.724 1.724 0 00-2.573-1.066c-1.543.94-3.31-.826-2.37-2.37a1.724 1.724 0 00-1.065-2.572c-1.756-.426-1.756-2.924 0-3.35a1.724 1.724 0 001.066-2.573c-.94-1.543.826-3.31 2.37-2.37.996.608 2.296.07 2.572-1.065z"></path></svg>
+                        上游调用通道切换
+                    </h3>
+                    <div class="flex flex-col md:flex-row gap-6 items-start md:items-center">
+                        <div class="flex items-center gap-5">
+                            <label class="flex items-center gap-2 cursor-pointer font-medium text-sm text-slate-700">
+                                <input type="radio" name="api_mode" value="api_key" checked onchange="updateMode('api_key')" class="w-4 h-4 text-blue-600 border-slate-300">
+                                <span>Express API Key (标准模式)</span>
+                            </label>
+                            <label class="flex items-center gap-2 cursor-pointer font-medium text-sm text-slate-700">
+                                <input type="radio" name="api_mode" value="web_proxy" onchange="updateMode('web_proxy')" class="w-4 h-4 text-blue-600 border-slate-300">
+                                <span>Agent Platform Studio (Cookie直连)</span>
+                            </label>
+                        </div>
+                    </div>
+                    
+                    <div id="web-proxy-config" class="hidden mt-5 pt-5 border-t border-slate-100 space-y-4">
+                        <div class="flex flex-col gap-3">
+                            <div id="cookie-direct-config" class="p-3 bg-blue-50/50 rounded-xl border border-blue-200 mt-2 space-y-3">
+                                <div>
+                                    <label class="text-xs font-bold text-slate-700 mb-1 flex items-center gap-1">
+                                        🚀 API 直连 Cookie (包含 HttpOnly 字段)
+                                    </label>
+                                    <textarea id="google-cookie-input" class="w-full text-xs p-2.5 border border-slate-300 rounded-lg shadow-inner bg-white focus:outline-none focus:ring-1 focus:ring-blue-500 text-slate-600 font-mono" rows="3" placeholder="在此粘贴从 console.cloud.google.com 获取的完整 Cookie（支持直接粘贴 Cookie-Editor 导出的 Header String 或 JSON，系统会自动解析）"></textarea>
+                                </div>
+                                <div>
+                                    <label class="text-xs font-bold text-slate-700 mb-1 block">
+                                        Google Cloud Project ID (项目 ID)
+                                    </label>
+                                    <input type="text" id="google-project-id-input" class="w-full text-xs p-2.5 border border-slate-300 rounded-lg shadow-inner bg-white focus:outline-none focus:ring-1 focus:ring-blue-500 text-slate-600 font-mono" placeholder="例如: xxxxxxx-xxxxxxx-xxxxx (可直接粘贴浏览器整条 URL，系统会自动提取 Project ID)">
+                                </div>
+                                <div class="flex justify-between items-center mt-2">
+                                    <div class="text-[10px] text-slate-500">保存后自动验证是否包含 SAPISID</div>
+                                    <button onclick="saveGoogleCookie()" class="bg-blue-600 hover:bg-blue-700 text-white font-semibold text-xs px-4 py-1.5 rounded-lg transition-all shadow-sm">保存直连配置并激活</button>
+                                </div>
+                            </div>
+                        </div>
+                        
+                        <div class="text-[11px] text-slate-600 mt-3 p-4 bg-blue-50/70 rounded-xl border border-blue-100/70 leading-relaxed shadow-sm space-y-2.5">
+                            <div>
+                                💡 <span class="font-bold text-blue-700 text-xs">获取 Cookie 与 Project ID 详细指引（支持手机端与电脑端）：</span>
+                            </div>
+                            <div class="space-y-1">
+                                <p><b>1. 获取完整 Cookie（包含关键 HttpOnly 字段）：</b></p>
+                                <ul class="list-disc pl-5 space-y-1">
+                                    <li><b>电脑端获取：</b>打开并登录 <code>console.cloud.google.com</code>，按 <b>F12</b> → 切换到 <b>Network</b> 选项卡 → 刷新网页 → 在左侧随便找一个请求点击 → 复制 Request Headers 中的 <code>Cookie</code> 整段字段值粘贴到下方。</li>
+                                    <li><b>手机端获取：</b>iOS 手机在 Safari 浏览器安装免费插件 <code>Cookie-Editor</code>，安卓手机使用 Kiwi 浏览器安装 <code>Cookie-Editor</code> 插件。登录 <code>console.cloud.google.com</code> 后点击插件，选择 <b>Export</b> 并选择 <b>Header String</b> 或 <b>JSON</b> 导出，直接粘贴到此处即可。</li>
+                                </ul>
+                            </div>
+                            <div class="space-y-1">
+                                <p><b>2. 获取 Project ID：</b></p>
+                                <ul class="list-disc pl-5">
+                                    <li>直接复制手机或电脑浏览器地址栏的<b>整条网址 URL</b>（如含有 <code>?project=xxx</code> 的链接），将其粘贴到 Project ID 的输入框中，系统会自动为你识别并提取出干净的项目 ID！</li>
+                                </ul>
+                            </div>
+                            <div class="text-amber-600 font-semibold pt-1 border-t border-blue-100/50">
+                                ⚠️ 注意事项：Cookie 有效期一般为 1~2 小时（PSIDTS 会过期），过期后模型调用会报 Permission Denied 错误，此时只需重新获取并粘贴保存即可。
+                            </div>
+                        </div>
                     </div>
                 </div>
 
@@ -201,7 +296,6 @@ DASHBOARD_HTML = """
                 </div>
             </div>
 
-            <!-- 视图 2：运行日志终端 (浅色轻量版) -->
             <div id="view-logs" class="hidden h-full max-w-6xl mx-auto flex flex-col glass-panel rounded-2xl overflow-hidden">
                 <div class="bg-white px-4 py-3 border-b border-slate-200 flex items-center gap-2.5">
                     <div class="flex gap-1.5">
@@ -211,15 +305,15 @@ DASHBOARD_HTML = """
                     </div>
                     <span class="ml-3 text-[11px] md:text-xs text-slate-400 font-mono font-medium">terminal ~ 实时监控</span>
                 </div>
-                <div id="log-window" class="log-container p-4 md:p-5 flex-1 overflow-y-auto space-y-2 text-[13px]">
-                    <!-- Logs injection here -->
-                </div>
+                <div id="log-window" class="log-container p-4 md:p-5 flex-1 overflow-y-auto space-y-2 text-[13px]"></div>
             </div>
         </div>
     </main>
 
     <script>
         let chartInstance = null;
+
+
         function formatNumber(num) { return num.toLocaleString('en-US'); }
 
         function switchTab(tabId) {
@@ -284,6 +378,139 @@ DASHBOARD_HTML = """
             }
         }
 
+        async function updateMode(mode) {
+            if(mode === 'web_proxy') document.getElementById('web-proxy-config').classList.remove('hidden');
+            else document.getElementById('web-proxy-config').classList.add('hidden');
+            
+            await fetch('/api/settings/mode', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ mode: mode })
+            });
+            if(mode === 'web_proxy') fetchStats(); // Refresh immediately
+        }
+
+        function tryParseCookies(str) {
+            str = str.trim();
+            if (str.startsWith('[') && str.endsWith(']')) {
+                try {
+                    const arr = JSON.parse(str);
+                    if (Array.isArray(arr)) {
+                        return arr.map(c => {
+                            const name = c.name || c.key;
+                            const value = c.value;
+                            return (name && value) ? `${name}=${value}` : '';
+                        }).filter(Boolean).join('; ');
+                    }
+                } catch (e) {}
+            }
+            return str;
+        }
+
+        function handleCookieInput(e) {
+            let val = e.target.value.trim();
+            if (val.includes('===VERTEX_SYNC===')) {
+                const lines = val.split('\\n');
+                let parsedProject = '';
+                let parsedCookie = '';
+                for (let line of lines) {
+                    const l = line.trim();
+                    if (l.startsWith('PROJECT_ID:')) {
+                        parsedProject = l.substring('PROJECT_ID:'.length).trim();
+                    } else if (l.startsWith('COOKIE:')) {
+                        parsedCookie = l.substring('COOKIE:'.length).trim();
+                    }
+                }
+                if (parsedProject && parsedCookie) {
+                    parsedCookie = tryParseCookies(parsedCookie);
+                    document.getElementById('google-cookie-input').value = parsedCookie;
+                    document.getElementById('google-project-id-input').value = parsedProject;
+                    alert('🎉 成功识别并解析一键同步凭证！\\nProject ID: ' + parsedProject);
+                }
+            } else {
+                const parsed = tryParseCookies(val);
+                if (parsed !== val) {
+                    document.getElementById('google-cookie-input').value = parsed;
+                }
+            }
+        }
+
+        async function saveGoogleCookie() {
+            let cookieStr = document.getElementById('google-cookie-input').value.trim();
+            let projectId = document.getElementById('google-project-id-input').value.trim();
+            
+            if (cookieStr.includes('===VERTEX_SYNC===')) {
+                const lines = cookieStr.split('\\n');
+                let parsedProject = '';
+                let parsedCookie = '';
+                for (let line of lines) {
+                    const l = line.trim();
+                    if (l.startsWith('PROJECT_ID:')) {
+                        parsedProject = l.substring('PROJECT_ID:'.length).trim();
+                    } else if (l.startsWith('COOKIE:')) {
+                        parsedCookie = l.substring('COOKIE:'.length).trim();
+                    }
+                }
+                if (parsedProject && parsedCookie) {
+                    cookieStr = parsedCookie;
+                    projectId = parsedProject;
+                }
+            }
+
+            cookieStr = tryParseCookies(cookieStr);
+            document.getElementById('google-cookie-input').value = cookieStr;
+            document.getElementById('google-project-id-input').value = projectId;
+
+            if(!cookieStr || !projectId) {
+                alert("请输入完整的 Cookie 字符串和 Project ID");
+                return;
+            }
+            try {
+                const res = await fetch('/api/headless/cookie', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ cookie: cookieStr, project_id: projectId })
+                });
+                const data = await res.json();
+                if(res.ok) {
+                    alert(data.message || "✅ 保存成功！直连模式已启用。");
+                    setTimeout(fetchStats, 1000);
+                } else {
+                    alert("❌ " + (data.error || "保存失败"));
+                }
+            } catch(e) {
+                alert("❌ 网络请求失败");
+            }
+        }
+
+        async function refreshCredentials() {
+            try {
+                const res = await fetch('/api/headless/refresh', { method: 'POST' });
+                if(res.ok) alert("🔄 已向无头浏览器发送刷新指令，可能需要数秒完成。");
+                else alert("❌ 刷新失败，请检查无头浏览器是否运行正常。");
+                setTimeout(fetchStats, 2000);
+            } catch(e) {
+                alert("❌ 网络请求失败");
+            }
+        }
+
+        async function loadRuntimeSettings() {
+            try {
+                const res = await fetch('/api/settings/runtime');
+                const state = await res.json();
+                if (state.use_web_proxy) {
+                    document.querySelector('input[name="api_mode"][value="web_proxy"]').checked = true;
+                    document.getElementById('web-proxy-config').classList.remove('hidden');
+                } else {
+                    document.querySelector('input[name="api_mode"][value="api_key"]').checked = true;
+                }
+                if (state.google_cookie) document.getElementById('google-cookie-input').value = state.google_cookie;
+                if (state.google_project_id) document.getElementById('google-project-id-input').value = state.google_project_id;
+            } catch (e) {
+                console.error("获取运行状态失败", e);
+            }
+        }
+
         const logWindow = document.getElementById('log-window');
         let isAutoScroll = true;
         
@@ -292,7 +519,7 @@ DASHBOARD_HTML = """
         });
 
         function formatLogText(text) {
-            let color = "#475569"; // 默认灰
+            let color = "#475569";
             let bgColor = "transparent";
             let borderLeft = "3px solid transparent";
             
@@ -329,8 +556,30 @@ DASHBOARD_HTML = """
             if (isAutoScroll) logWindow.scrollTop = logWindow.scrollHeight;
         };
 
-        fetchStats();
-        setInterval(fetchStats, 3000);
+        function handleProjectIdInput(e) {
+            let val = e.target.value.trim();
+            if (val.includes('project=')) {
+                const match = val.match(/[?&]project=([^&]+)/);
+                if (match && match[1]) {
+                    e.target.value = match[1];
+                }
+            } else if (val.includes('/projects/')) {
+                const match = val.match(/\/projects\/([^/]+)/);
+                if (match && match[1]) {
+                    e.target.value = match[1];
+                }
+            }
+        }
+
+        function init() {
+            fetchStats();
+            loadRuntimeSettings();
+            setInterval(fetchStats, 3000);
+            document.getElementById('google-cookie-input').addEventListener('input', handleCookieInput);
+            document.getElementById('google-project-id-input').addEventListener('input', handleProjectIdInput);
+        }
+
+        init();
     </script>
 </body>
 </html>
@@ -343,6 +592,69 @@ async def dashboard_ui(username: str = Depends(verify_auth)):
 @app.get("/api/stats")
 async def get_stats_api(username: str = Depends(verify_auth)):
     return JSONResponse(content=stats.get_json_stats())
+
+# ==========================================
+# 💎 API：设置与无头浏览器控制
+# ==========================================
+class ModeSetting(BaseModel):
+    mode: str
+
+@app.get("/api/settings/runtime")
+async def get_runtime_settings(username: str = Depends(verify_auth)):
+    return JSONResponse(content={
+        "use_web_proxy": app_state.is_web_proxy_enabled(),
+        "google_cookie": app_state.get_google_cookie(),
+        "google_project_id": app_state.get_project_id()
+    })
+
+@app.post("/api/settings/mode")
+async def set_settings_mode(setting: ModeSetting, username: str = Depends(verify_auth)):
+    app_state.enable_web_proxy(setting.mode == "web_proxy")
+    
+    # 若有 cookie，无需强行启动无头浏览器，它会走直连模式
+    global _global_browser
+    if setting.mode == "web_proxy" and (not _global_browser or not _global_browser.is_running):
+        # 仅当没有 Cookie 时尝试启动备用的无头浏览器
+        if not app_state.get_google_cookie() and config.HEADLESS_MODE:
+            asyncio.create_task(run_headless_browser())
+        
+    return JSONResponse(content={"status": "success"})
+
+@app.get("/api/headless/status")
+async def get_headless_status(username: str = Depends(verify_auth)):
+    global _global_browser
+    is_running = _global_browser is not None and _global_browser.is_running
+    needs_login = False
+    return JSONResponse(content={
+        "is_running": is_running,
+        "needs_login": needs_login,
+        "credential_age": app_state.get_credential_age() if app_state.get_credential_timestamp() > 0 else None
+    })
+
+@app.post("/api/headless/refresh")
+async def trigger_headless_refresh(username: str = Depends(verify_auth)):
+    global _global_browser
+    if _global_browser and _global_browser.is_running:
+        asyncio.create_task(_global_browser.send_test_message())
+        return JSONResponse(content={"status": "success"})
+    return JSONResponse(status_code=503, content={"error": "无头浏览器未运行 (如果是直连模式则无需刷新)"})
+
+class CookieSetting(BaseModel):
+    cookie: str
+    project_id: str
+
+@app.post("/api/headless/cookie")
+async def set_google_cookie(setting: CookieSetting, username: str = Depends(verify_auth)):
+    validation = validate_cookie(setting.cookie)
+    if not validation["valid"]:
+        return JSONResponse(status_code=400, content={"error": validation["message"]})
+        
+    app_state.set_google_cookie(setting.cookie.strip())
+    app_state.set_project_id(setting.project_id.strip())
+    
+    return JSONResponse(content={"status": "success", "message": validation["message"]})
+
+
 
 @app.get("/stream-logs")
 async def stream_logs_endpoint(request: Request, username: str = Depends(verify_auth)):
