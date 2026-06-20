@@ -2,8 +2,8 @@
 batchGraphql 直连代理上游通道
 
 基于 Agent Platform Studio Express Mode 的 batchGraphql 协议实现。
-无需无头浏览器，直接通过 Cookie + SAPISIDHASH 鉴权调用 batchGraphql 端点。
 支持完整的 Function Calling (工具调用) 与 Google Search。
+内置终极防弹 Schema 清洗器、参数强制兜底与纯净历史回放机制。
 """
 
 import json
@@ -12,7 +12,6 @@ import uuid
 import asyncio
 import httpx
 import traceback
-import sys
 from typing import Any, Optional, List, Dict, AsyncGenerator
 from fastapi import Request
 from fastapi.responses import StreamingResponse, JSONResponse
@@ -190,23 +189,13 @@ def _convert_messages_to_contents(messages: list) -> tuple:
             except json.JSONDecodeError:
                 tool_output_data = {"result": str(content)}
             
-            # 🎯 精准解析 ID，绝不牵连 Signature
-            tool_call_id_str = getattr(msg, "tool_call_id", "") or ""
-            real_tool_id = ""
-            if "__thought__" in tool_call_id_str:
-                real_tool_id = tool_call_id_str.split("__thought__")[0]
-            else:
-                real_tool_id = tool_call_id_str
-
-            func_resp = {
-                "name": msg.name or "unknown",
-                "response": tool_output_data
-            }
-            # ✅ 把真实 ID 还给它，满足 3.5-flash 的并行匹配要求
-            if real_tool_id and not real_tool_id.startswith("call_"):
-                func_resp["id"] = real_tool_id
-                
-            parts.append({"functionResponse": func_resp})
+            # 🛡️ 纯净还原：只传 name 和 response，绝对不传 ID 和 Signature
+            parts.append({
+                "functionResponse": {
+                    "name": msg.name or "unknown",
+                    "response": tool_output_data
+                }
+            })
             
         # 2. 还原 Function Call 历史 (属于 model 角色)
         elif role == "assistant" and getattr(msg, "tool_calls", None):
@@ -222,25 +211,19 @@ def _convert_messages_to_contents(messages: list) -> tuple:
                     args_dict = {}
                 
                 tool_call_id_str = tool_call.get("id", "")
-                real_tool_id = ""
                 thought_sig = ""
                 if "__thought__" in tool_call_id_str:
                     parts_id = tool_call_id_str.split("__thought__")
-                    real_tool_id = parts_id[0]
                     thought_sig = parts_id[1] if len(parts_id) > 1 else ""
-                else:
-                    real_tool_id = tool_call_id_str
                     
-                func_call = {
-                    "name": func_data.get("name", "unknown"),
-                    "args": args_dict
+                # 🛡️ 纯净还原：只传 name 和 args，绝对不传 ID
+                part_dict = {
+                    "functionCall": {
+                        "name": func_data.get("name", "unknown"),
+                        "args": args_dict
+                    }
                 }
-                # ✅ 同样把真实 ID 还给模型历史
-                if real_tool_id and not real_tool_id.startswith("call_"):
-                    func_call["id"] = real_tool_id
-                    
-                part_dict = {"functionCall": func_call}
-                # ✅ 只把签名放进模型历史中，且必须是驼峰命名
+                # 如果有签名，仅使用官方驼峰命名
                 if thought_sig:
                     part_dict["thoughtSignature"] = thought_sig
                     
@@ -335,15 +318,22 @@ def _build_batch_graphql_body(project_id: str, model_name: str, request: OpenAIR
                 func_data = tool.get("function")
                 if func_data:
                     declaration = {
-                        "name": func_data.get("name"),
-                        "description": func_data.get("description"),
+                        "name": func_data.get("name")
                     }
+                    if func_data.get("description"):
+                        declaration["description"] = func_data.get("description")
+                        
                     parameters = func_data.get("parameters")
                     if isinstance(parameters, dict):
                         parameters = _clean_and_convert_schema(parameters)
-                        if parameters:
-                            parameters["type"] = "OBJECT"
-                            declaration["parameters"] = parameters
+                    else:
+                        parameters = None
+                        
+                    # 🛡️ 强制兜底：没传参数的插件，强制给个空壳对象，防谷歌报错
+                    if not parameters or "type" not in parameters:
+                        parameters = {"type": "OBJECT", "properties": {}}
+                        
+                    declaration["parameters"] = parameters
                     function_declarations.append(declaration)
         if function_declarations:
             tools_list.append({"functionDeclarations": function_declarations})
@@ -499,11 +489,6 @@ async def _execute_stream_request(client, headers, body, model_display, response
     has_content = False
     has_tool_call = False
     
-    # 加入了强制刷新的打印，如果依然报错，这次绝对能截获案发 JSON！
-    print("\n" + "="*20 + " 🕵️‍♂️ SENDING JSON TO GOOGLE " + "="*20)
-    print(json.dumps(body, indent=2, ensure_ascii=False))
-    print("="*60 + "\n", flush=True)
-    
     try:
         async with client.stream("POST", BATCH_GRAPHQL_URL, headers=headers, json=body) as response:
             if response.status_code != 200:
@@ -530,14 +515,10 @@ async def _execute_stream_request(client, headers, body, model_display, response
                     elif event_type == "function_call":
                         func_name = data["call"].get("name", "unknown")
                         args_dict = data["call"].get("args", {})
-                        real_id = data["call"].get("id", "")
                         thought_sig = data.get("sig", "")
                         
-                        if real_id:
-                            tool_call_id = f"{real_id}__thought__{thought_sig}" if thought_sig else real_id
-                        else:
-                            rand_str = f"{int(time.time()*1000)}_{func_name}"
-                            tool_call_id = f"call_{response_id}_{rand_str}__thought__{thought_sig}" if thought_sig else f"call_{response_id}_{rand_str}"
+                        rand_str = f"{int(time.time()*1000)}_{func_name}"
+                        tool_call_id = f"call_{response_id}_{rand_str}__thought__{thought_sig}" if thought_sig else f"call_{response_id}_{rand_str}"
                             
                         tc = [{"index": 0, "id": tool_call_id, "type": "function", "function": {"name": func_name, "arguments": json.dumps(args_dict, ensure_ascii=False)}}]
                         events.append(_make_openai_chunk(response_id, model_display, tool_calls=tc))
@@ -661,14 +642,10 @@ class HeadlessProxyUpstream(BaseUpstream):
                             elif event_type == "function_call":
                                 func_name = data["call"].get("name", "unknown")
                                 args_dict = data["call"].get("args", {})
-                                real_id = data["call"].get("id", "")
                                 thought_sig = data.get("sig", "")
                                 
-                                if real_id:
-                                    tool_call_id = f"{real_id}__thought__{thought_sig}" if thought_sig else real_id
-                                else:
-                                    rand_str = f"{int(time.time()*1000)}_{func_name}"
-                                    tool_call_id = f"call_{response_id}_{rand_str}__thought__{thought_sig}" if thought_sig else f"call_{response_id}_{rand_str}"
+                                rand_str = f"{int(time.time()*1000)}_{func_name}"
+                                tool_call_id = f"call_{response_id}_{rand_str}__thought__{thought_sig}" if thought_sig else f"call_{response_id}_{rand_str}"
                                     
                                 tool_calls_list.append({"id": tool_call_id, "type": "function", "function": {"name": func_name, "arguments": json.dumps(args_dict, ensure_ascii=False)}})
                             elif event_type == "finish":
